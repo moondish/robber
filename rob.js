@@ -1,4 +1,4 @@
-// grab.js — 选课抢课独立工具主流程
+// rob.js — 选课抢课独立工具主流程
 //
 // 流程：载入配置/模板/会话 → （无会话则）弹出浏览器手动登录+网络层抓模板 →
 // 保存会话 → 用纯 HTTP 请求（带 JSESSIONID/route cookie）跑抢课循环。
@@ -126,7 +126,7 @@ function deleteAllGeneratedData() {
 var cli = parseCli(process.argv.slice(2));
 if (cli.invalidArgs.length) {
   console.error('已移除以下参数: ' + cli.invalidArgs.join(', ') +
-    '。干跑请使用 --dryrun，实跑直接运行 node grab.js。');
+    '。干跑请使用 --dryrun，实跑直接运行 node rob.js。');
   process.exit(1);
 }
 var defaultConfig = fs.existsSync(path.join(__dirname, 'config', 'config.json'))
@@ -1044,7 +1044,7 @@ async function ensureLogin() {
   }
   if (missing.length) {
     throw new NotPreparedError('准备结果不完整，缺少: ' + missing.join('；') +
-      '。请重新运行: node grab.js --prepare --sso zfsoft|wengine');
+      '。请重新运行: node rob.js --prepare --sso zfsoft|wengine');
   }
 
   log('加载准备结果，探测会话有效性…', 'info');
@@ -1060,7 +1060,7 @@ async function ensureLogin() {
   } catch (e) {
     try { await rc.dispose(); } catch (e2) {}
     var detail = e instanceof SessionError ? '会话已过期' : ('会话探测失败: ' + e.message);
-    throw new NotPreparedError(detail + '。请重新运行: node grab.js --prepare --sso zfsoft|wengine');
+    throw new NotPreparedError(detail + '。请重新运行: node rob.js --prepare --sso zfsoft|wengine');
   }
 }
 
@@ -1207,7 +1207,7 @@ async function doLogin() {
       try { debug.log('login-timeout-snapshot', await pageSnapshot(page)); } catch (e) {}
       log('调试日志已写入: ' + debug.file, 'warn');
     }
-    log('排查建议：用 node grab.js --capture 抓一次，或导出 HAR 后运行 node grab.js --import-har 文件.har', 'warn');
+    log('排查建议：用 node rob.js --capture 抓一次，或导出 HAR 后运行 node rob.js --import-har 文件.har', 'warn');
     if (await isInAcademicSystem(page)) {
       await saveSession(context, statePath, '超时前保留教务系统会话');
     }
@@ -1509,7 +1509,7 @@ function handleSessionExpired() {
   log('== 会话已过期 ==', 'err');
   log(cfg.headless
     ? '服务器场景：请在本机重跑一次 --prepare 生成新的 ' + (cfg.stateFile || path.join('state', 'state.json')) + ' 后传回服务器。'
-    : '请重新运行: node grab.js --prepare --sso zfsoft|wengine', 'warn');
+    : '请重新运行: node rob.js --prepare --sso zfsoft|wengine', 'warn');
   notify('选课工具会话过期', '需要重新登录');
   process.exitCode = 2;
 }
@@ -1558,23 +1558,23 @@ async function runLoop(rc) {
 function printHelp() {
   console.log([
     '用法:',
-    '  node grab.js --prepare --sso MODE    登录并采集 Cookie/模板，完成后退出',
-    '  node grab.js                         使用已准备结果运行（不能自动登录）',
-    '  node grab.js --account <id>          只运行指定账号',
-    '  node grab.js --capture [--account]   打开浏览器抓包，按 Enter 保存',
-    '  node grab.js --import-har FILE       从 HAR 导入指定账号的模板',
-    '  node grab.js --list-accounts         列出配置中的账号',
-    '  node grab.js --config FILE           使用指定配置文件',
-    '  node grab.js --force-login           忽略已保存会话，强制重新登录',
-    '  node grab.js --sso zfsoft            正方原生登录入口',
-    '  node grab.js --sso wengine           反向代理/WEngine 登录入口',
-    '  node grab.js --dryrun                强制干跑（只查询，不提交）',
-    '  node grab.js --delete                清空配置、Cookie/模板和日志',
-    '  node grab.js --debug                 输出详细登录/跳转/表单日志',
-    '  node grab.js --help                  显示本帮助',
+    '  node rob.js --prepare --sso MODE    登录并采集 Cookie/模板，完成后退出',
+    '  node rob.js                         使用已准备结果运行（不能自动登录）',
+    '  node rob.js --account <id>          只运行指定账号',
+    '  node rob.js --capture [--account]   打开浏览器抓包，按 Enter 保存',
+    '  node rob.js --import-har FILE       从 HAR 导入指定账号的模板',
+    '  node rob.js --list-accounts         列出配置中的账号',
+    '  node rob.js --config FILE           使用指定配置文件',
+    '  node rob.js --force-login           忽略已保存会话，强制重新登录',
+    '  node rob.js --sso zfsoft            正方原生登录入口',
+    '  node rob.js --sso wengine           反向代理/WEngine 登录入口',
+    '  node rob.js --dryrun                强制干跑（只查询，不提交）',
+    '  node rob.js --delete                清空配置、Cookie/模板和日志',
+    '  node rob.js --debug                 输出详细登录/跳转/表单日志',
+    '  node rob.js --help                  显示本帮助',
     '',
     '--sso 只能与 --prepare 或 --capture 一起使用。',
-    '--dryrun 开启干跑；node grab.js 不带该参数时执行实跑。',
+    '--dryrun 开启干跑；node rob.js 不带该参数时执行实跑。',
     '--delete 必须单独使用，不能与任何其他参数组合。',
     '接口路径可在 config/config.json 的 api 字段覆盖，例如:',
     '  "api": { "query": "/xsxk/xxx.html?gnmkdm=N253512" }'
