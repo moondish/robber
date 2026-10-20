@@ -1,0 +1,59 @@
+{
+  "base": "https://jwglxt.example.edu.cn/jwglxt",
+  "indexPath": "/xsxk/zzxkyzb_cxZzxkYzbIndex.html",
+  "gnmkdm": "N253512",
+  "appendGnmkdm": true,
+  "api": {
+    "index": "",
+    "display": "",
+    "query": "",
+    "detail": "",
+    "submit": "",
+    "choosed": "",
+    "drop": "",
+    "title": "",
+    "batch": ""
+  },
+  "intervalSec": 2.5,
+  "kklxdm": "10",
+  "dryRun": true,
+  "headless": false,
+  "loginTimeoutMin": 5,
+  "requestTimeoutSec": 30,
+  "useTitleProbe": true,
+  "notify": {
+    "webhook": "",
+    "beep": true
+  },
+  "concurrency": 2,
+  "restartDelaySec": 15,
+  "maxRestarts": 5,
+  "accounts": [
+    {
+      "id": "account1",
+      "login": {
+        "username": "",
+        "password": ""
+      },
+      "targets": {
+        "kch": "",
+        "jxb": "",
+        "kw": "",
+        "njdm_id": "2025"
+      }
+    },
+    {
+      "id": "account2",
+      "login": {
+        "username": "",
+        "password": ""
+      },
+      "targets": {
+        "kch": "",
+        "jxb": "",
+        "kw": "",
+        "njdm_id": "2025"
+      }
+    }
+  ]
+}

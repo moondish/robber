@@ -1,0 +1,36 @@
+# 依赖
+node_modules/
+
+# 运行时生成 / 敏感文件（勿提交）
+config.json
+state.json
+templates.json
+state/
+logs/
+*.log
+*.har
+capture*.json
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 构建产物（字节码 release/app、安装包）
+release/
+out-nsis*/
+out/
+dist/
+
+# 部署临时脚本（含服务器凭据，勿提交）
+.deploy/
+server/data/
+server/.token
+server/auth.db
+server/.viewpass
+server/*.log
+
+# 商业化后端与客户端（仅 dev，不入 main）
+native/
+scripts/
+electron/
+server/public/

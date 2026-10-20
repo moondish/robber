@@ -1,0 +1,19 @@
+{
+  "name": "xuanke-grabber",
+  "version": "0.1.0",
+  "private": true,
+  "description": "正方教务系统自动抢课独立工具（手动登录 + 接口抢课）",
+  "license": "MIT",
+  "main": "grab.js",
+  "scripts": {
+    "start": "node grab.js",
+    "prepare-accounts": "node grab.js --prepare",
+    "accounts": "node grab.js --list-accounts",
+    "capture": "node grab.js --capture",
+    "import-har": "node grab.js --import-har",
+    "test": "node lib/self_test.js"
+  },
+  "dependencies": {
+    "playwright": "^1.45.0"
+  }
+}
