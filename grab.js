@@ -36,6 +36,7 @@ function parseCli(argv) {
     help: false,
     listAccounts: false,
     prepare: false,
+    prewarm: false,
     forceLogin: false,
     debug: false,
     sso: null,
@@ -50,6 +51,7 @@ function parseCli(argv) {
     else if (a === '--help' || a === '-h') out.help = true;
     else if (a === '--list-accounts') out.listAccounts = true;
     else if (a === '--prepare') out.prepare = true;
+    else if (a === '--prewarm') out.prewarm = true;
     else if (a === '--force-login') out.forceLogin = true;
     else if (a === '--debug' || a === '--verbose' || a === '-d') out.debug = true;
     else if (a === '--dryrun' || a === '--dry-run') {
@@ -222,6 +224,7 @@ var state = cfg ? {
   dryRun: !!cfg.dryRun,
   interval: cfg.intervalSec >= 1 ? cfg.intervalSec : 2.5,
   kklxdm: String(cfg.kklxdm || '10'),
+  succeeded: false,
   claim: {},      // kch -> true（已抢成，永久停）
   cooldown: {}    // kch -> 时间戳（冷却到点后再试）
 } : null;
@@ -435,7 +438,15 @@ async function apiPost(rc, endpoint, obj, opts) {
     var tail = t.length > 120 ? t.slice(0, 120).replace(/\s+/g, ' ') : t;
     throw new SessionError('收到HTML响应（可能登录失效/会话过期），长度' + t.length + '，开头: ' + tail);
   }
-  return parseRes(t);
+  var parsed = parseRes(t);
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    var code = String(parsed.code != null ? parsed.code : (parsed.statusCode != null ? parsed.statusCode : (parsed.status != null ? parsed.status : '')));
+    var apiMsg = String(parsed.msg || parsed.message || '');
+    if (code === '901' || code === '910' || /用户登录|请先登录|未登录/.test(apiMsg)) {
+      throw new SessionError('接口返回会话失效' + (code ? '（' + code + '）' : ''));
+    }
+  }
+  return parsed;
 }
 
 /* ---------------------------- 模板采集（网络层） ---------------------------- */
@@ -816,6 +827,56 @@ async function tryTriggerQuery(page) {
   } catch (e) {}
 }
 
+async function capturePageContext(page) {
+  if (templates.ctx) return;
+  var keys = [
+    'bh_id', 'jg_id', 'zyh_id', 'zyfx_id', 'njdm_id', 'xz', 'ccdm', 'xbm',
+    'mzm', 'xslbdm', 'xsbj', 'xkxnm', 'xkxqm', 'xkly', 'xklc', 'rwlx',
+    'kklxdm', 'xkkz_id'
+  ];
+  var frames = page.frames();
+  for (var i = 0; i < frames.length && !templates.ctx; i++) {
+    try {
+      var found = await frames[i].evaluate(function (wanted) {
+        var out = {};
+        var inputs = document.querySelectorAll('input[name], select[name], textarea[name]');
+        for (var i = 0; i < inputs.length; i++) {
+          var name = inputs[i].getAttribute('name') || '';
+          if (wanted.indexOf(name) > -1) out[name] = inputs[i].value || '';
+        }
+        wanted.forEach(function (key) {
+          try {
+            if (out[key] == null && window[key] != null && typeof window[key] !== 'object') {
+              out[key] = String(window[key]);
+            }
+          } catch (e) {}
+        });
+        var sources = [];
+        var marked = document.querySelectorAll('[onclick], [data-params], [data-url]');
+        for (var j = 0; j < marked.length; j++) sources.push(marked[j].outerHTML || '');
+        var scripts = document.querySelectorAll('script:not([src])');
+        for (var k = 0; k < scripts.length; k++) sources.push(scripts[k].textContent || '');
+        wanted.forEach(function (key) {
+          if (out[key] != null) return;
+          var re = new RegExp(key + '\\s*[:=]\\s*[\'"]?([^\'"?,;&}\\s]+)', 'i');
+          for (var s = 0; s < sources.length; s++) {
+            var match = sources[s].match(re);
+            if (match) { out[key] = match[1]; break; }
+          }
+        });
+        return out.bh_id ? out : null;
+      }, keys);
+      if (found) {
+        templates.ctx = found;
+        var xk = params.pickXkkzFromObj(found);
+        if (xk && !templates.xkkz) templates.xkkz = String(xk);
+        log('✓ 页面学生上下文已采集', 'ok');
+        debug.log('page-context', found);
+      }
+    } catch (e) {}
+  }
+}
+
 function looksLikeAuthUrl(url) {
   return apiLib.isLoginUrl(url);
 }
@@ -986,8 +1047,8 @@ async function ensureLogin() {
   }
   if (!savedTpl) {
     missing.push('模板文件 ' + (cfg.templatesFile || path.join('state', 'templates.json')));
-  } else if (!templates.ctx || !templates.query) {
-    missing.push('模板中的 ctx/query 数据');
+  } else if (!templates.ctx) {
+    missing.push('模板中的 ctx 学生上下文');
   }
   if (missing.length) {
     throw new NotPreparedError('准备结果不完整，缺少: ' + missing.join('；') +
@@ -1102,6 +1163,7 @@ async function doLogin() {
   var initialSelection = await ensureSelectionPage(page);
   if (initialSelection || await isInAcademicSystem(page)) {
     await saveSession(context, statePath, '进入教务系统');
+    await capturePageContext(page);
   }
 
   if (cli.capture) {
@@ -1126,8 +1188,9 @@ async function doLogin() {
     var loopSelection = await ensureSelectionPage(page);
     if (loopSelection || await isInAcademicSystem(page)) {
       await saveSession(context, statePath, '教务系统会话更新');
+      await capturePageContext(page);
     }
-    if (templates.ctx && templates.query) break;
+    if (templates.ctx && (templates.query || cli.prewarm)) break;
     if (templates.ctx && !templates.query && triggered < 3) {
       await tryTriggerQuery(page);
       triggered++;
@@ -1135,8 +1198,9 @@ async function doLogin() {
     await params.sleep(1000);
   }
 
-  if (!cli.capture && (!templates.ctx || !templates.query)) {
-    log('超时未检测到模板：请确认已登录并进入选课页、页面能正常加载选课数据。', 'err');
+  var preparationReady = templates.ctx && (templates.query || cli.prewarm);
+  if (!cli.capture && !preparationReady) {
+    log('超时未检测到可用的学生上下文/模板：请确认已登录并进入教务系统。', 'err');
     log('已抓到的接口: ' + JSON.stringify(templates.api || {}), 'warn');
     if (debug.enabled) {
       try { debug.log('login-timeout-snapshot', await pageSnapshot(page)); } catch (e) {}
@@ -1185,7 +1249,32 @@ function markCooldown(course, ms) {
 async function doQuery(rc) {
   var p = params.buildQueryParams(templates, state.kklxdm);
   var res = await apiPost(rc, 'query', p);
-  return params.extractList(res, ['tmpList', 'list', 'rows', 'items']);
+  var list = params.extractList(res, ['tmpList', 'list', 'rows', 'items']);
+  var changed = false;
+  if (!templates.query) {
+    templates.query = params.deepCopy(p);
+    changed = true;
+    log('✓ 运行时查询模板已补齐', 'ok');
+  }
+  var responseXk = params.pickXkkzFromObj(res);
+  if (responseXk && String(templates.xkkz || '') !== String(responseXk)) {
+    templates.xkkz = String(responseXk);
+    changed = true;
+    log('✓ 运行时选课批次 xkkz_id 已更新: ' + templates.xkkz, 'ok');
+  }
+  for (var i = 0; i < list.length; i++) {
+    var xk = params.pickXkkzFromObj(list[i]);
+    if (xk) {
+      if (String(templates.xkkz || '') !== String(xk)) {
+        templates.xkkz = String(xk);
+        changed = true;
+        log('✓ 运行时选课批次 xkkz_id 已更新: ' + templates.xkkz, 'ok');
+      }
+      break;
+    }
+  }
+  if (changed) saveTemplates();
+  return list;
 }
 
 async function scanOnce(rc) {
@@ -1198,6 +1287,7 @@ async function scanOnce(rc) {
     if (hits.length) {
       log('[命中] ' + hits.map(function (c) { return '[' + c.kch + ']' + c.kcmc; }).join(' / '), 'hit');
       for (var i = 0; i < hits.length; i++) {
+        if (state.succeeded) break;
         if (!state.dryRun) await maybeAutoSelect(rc, hits[i]);
       }
     }
@@ -1227,6 +1317,7 @@ async function maybeAutoSelect(rc, course) {
       notify('已选课程', course.kcmc + ' 已在已选课表中');
       state.claim[kch] = true;
       state.cooldown[kch] = 0;
+      state.succeeded = true;
       return;
     }
   } catch (e) {
@@ -1245,6 +1336,10 @@ async function maybeAutoSelect(rc, course) {
 }
 
 async function fetchJxb(rc, course) {
+  if (course.do_jxb_id || course.jxb_ids) {
+    log('[选课] 列表已包含加密教学班 ID，跳过详情请求', 'info');
+    return course;
+  }
   var p = params.fetchJxbParams(templates, course, state.kklxdm);
   var res = await apiPost(rc, 'detail', p);
   // 服务端对"无可用可选教学班"返回 "0"（字符串）或空数组
@@ -1318,13 +1413,16 @@ async function handleSubmitResult(rc, course, detail, res) {
   var desc = '[' + (course.kch || course.kch_id) + '] ' + course.kcmc;
   var flag = res && (res.flag != null ? String(res.flag) : '');
   var msg = res && (res.msg || res.message || res.errmsg) ? String(res.msg || res.message || res.errmsg) : '';
-  var ok = flag === '1' || res === 1 || res === '1' || (res && res.success === true);
+  var ok = flag === '1' || res === 1 || res === '1' ||
+    (res && res.success === true) ||
+    (/成功/.test(msg) && !/失败|未成功/.test(msg));
   if (ok) {
     log('[成功] 抢课成功: ' + desc, 'ok');
     notify('抢课成功', course.kcmc + ' 已选上');
     beep();
     state.claim[kchKey] = true;
     state.cooldown[kchKey] = 0;
+    state.succeeded = true;
   } else {
     log('[失败] ' + desc + (msg ? ' - ' + msg : ' - flag=' + flag + ' resp=' + JSON.stringify(res)), 'err');
     if (/冲突/.test(msg)) {
@@ -1383,6 +1481,10 @@ async function runLoop(rc) {
   while (true) {
     try {
       await scanOnce(rc);
+      if (state.succeeded) {
+        log('✓ 目标请求已返回成功，停止轮询', 'ok');
+        break;
+      }
     } catch (e) {
       if (e instanceof SessionError) { handleSessionExpired(); break; }
       log('[循环] 异常: ' + e.message, 'err');
@@ -1395,6 +1497,7 @@ function printHelp() {
   console.log([
     '用法:',
     '  node grab.js --prepare --sso MODE    登录并采集 Cookie/模板，完成后退出',
+    '  node grab.js --prepare --prewarm     开抢前预登录并保存学生上下文',
     '  node grab.js                         使用已准备结果运行（不能自动登录）',
     '  node grab.js --account <id>          只运行指定账号',
     '  node grab.js --capture [--account]   打开浏览器抓包，按 Enter 保存',
@@ -1472,8 +1575,13 @@ async function main() {
   }
   if (cli.prepare) {
     await doLogin();
-    log('账号准备完成：Cookie 已一次性保存，模板已写入，准备进程退出。', 'ok');
+    log(cli.prewarm
+      ? '账号预热完成：Cookie、学生上下文和已有模板已保存；动态批次将在开抢后的首次查询中获取。'
+      : '账号准备完成：Cookie 已一次性保存，模板已写入，准备进程退出。', 'ok');
     return;
+  }
+  if (cli.prewarm) {
+    throw new Error('--prewarm 只能与 --prepare 一起使用');
   }
   if (cli.forceLogin) {
     throw new NotPreparedError('--force-login 只能与 --prepare 一起使用');

@@ -10,6 +10,7 @@
     "prepare": "node grab.js --prepare",
     "prepare:zfsoft": "node grab.js --prepare --sso zfsoft",
     "prepare:wengine": "node grab.js --prepare --sso wengine",
+    "prepare:warm": "node grab.js --prepare --prewarm --sso wengine",
     "prepare-accounts": "node grab.js --prepare",
     "dryrun": "node grab.js --dryrun",
     "delete": "node grab.js --delete",

@@ -49,6 +49,8 @@
 
 > 抢课拼的是速度。别人还在输密码的时候，你的课已经选完了。
 
+目标命中后会持续查询并重试提交，直到服务器返回成功或确认课程已在已选列表；成功后自动停止轮询。会话失效、系统维护等不可恢复错误会停止并提示重新准备。
+
 ## 技术栈
 
 - **Node.js** (>= 16)
@@ -63,11 +65,14 @@ npm install                      # 安装依赖（含 Playwright 浏览器）
 Copy-Item config/config.example.json config/config.json   # 生成配置（PowerShell）
 # 编辑 config/config.json：base 改成你的正方地址，填 targets 目标课程
 node grab.js --prepare --sso wengine   # 反代登录；正方原生入口用 --sso zfsoft
+node grab.js --prepare --prewarm --sso wengine  # 开抢前预热会话/学生上下文
 node grab.js --dryrun                  # 干跑：只查询和匹配，不提交
 node grab.js --dryrun=false            # 实跑：允许自动提交
 ```
 
 首次必须先执行 `--prepare`。浏览器完成登录并采集 Cookie/请求模板后会自动关闭、退出准备进程；此后普通运行不会再次打开登录浏览器。若未准备，`node grab.js` 会直接报错。
+
+`--prewarm` 可在选课开放前提前准备：拿到 Cookie 和学生上下文后即可退出。正式运行时由首次有效查询补齐查询模板与 `xkkz_id`；教学班加密 ID `do_jxb_id` 仍会在每次选课时实时获取。
 
 所有账号（包括只有一个账号）统一使用 `accounts[]`。仅保留一个 `config/config.example.json`，在其中添加多个 `accounts[]` 条目即可切换为多账号；每个账号独立 `state` / `templates` / 日志：
 
