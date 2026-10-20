@@ -38,6 +38,9 @@ function parseCli(argv) {
     prepare: false,
     forceLogin: false,
     debug: false,
+    sso: null,
+    dryRun: null,
+    deleteAll: false,
     account: null,
     configFile: null
   };
@@ -49,6 +52,28 @@ function parseCli(argv) {
     else if (a === '--prepare') out.prepare = true;
     else if (a === '--force-login') out.forceLogin = true;
     else if (a === '--debug' || a === '--verbose' || a === '-d') out.debug = true;
+    else if (a === '--dryrun' || a === '--dry-run') {
+      var dryValue = argv[i + 1];
+      if (dryValue && /^(true|false)$/i.test(dryValue)) {
+        out.dryRun = /^true$/i.test(dryValue);
+        i++;
+      } else {
+        out.dryRun = true;
+      }
+    }
+    else if (/^--dry-?run=(true|false)$/i.test(a)) out.dryRun = /=(true)$/i.test(a);
+    else if (a === '--no-dryrun' || a === '--no-dry-run') out.dryRun = false;
+    else if (a === '--delete' || a === '--delte') out.deleteAll = true;
+    else if (a === '--sso') {
+      var ssoValue = argv[i + 1];
+      if (ssoValue && ssoValue.charAt(0) !== '-') {
+        out.sso = ssoValue;
+        i++;
+      } else {
+        out.sso = 'wengine';
+      }
+    }
+    else if (a.indexOf('--sso=') === 0) out.sso = a.slice('--sso='.length);
     else if (a === '--account') out.account = argv[++i] || '';
     else if (a.indexOf('--account=') === 0) out.account = a.slice('--account='.length);
     else if (a === '--config') out.configFile = argv[++i] || '';
@@ -59,14 +84,85 @@ function parseCli(argv) {
   return out;
 }
 
+function normaliseSsoMode(value) {
+  var v = String(value || '').trim().toLowerCase();
+  if (!v) throw new Error('--sso 需要指定 zfsoft 或 wengine');
+  if (v === 'zfsoft' || v === 'zf' || v === 'native' || v === '正方') return 'zfsoft';
+  if (v === 'wengine' || v === 'proxy' || v === 'reverse' || v === '反代') return 'wengine';
+  throw new Error('--sso 仅支持 zfsoft 或 wengine: ' + value);
+}
+
+function deleteAllGeneratedData() {
+  var targets = [
+    { label: '默认配置', file: path.join(__dirname, 'config', 'config.json') },
+    { label: '会话与模板目录', file: path.join(__dirname, 'state') },
+    { label: '日志目录', file: path.join(__dirname, 'logs') },
+    { label: '旧版根配置', file: path.join(__dirname, 'config.json') },
+    { label: '旧版根会话', file: path.join(__dirname, 'state.json') },
+    { label: '旧版根模板', file: path.join(__dirname, 'templates.json') },
+    { label: '旧版根日志', file: path.join(__dirname, 'grab.log') },
+    { label: '旧版根调试日志', file: path.join(__dirname, 'grab.debug.log') }
+  ];
+  var removed = 0;
+  var failed = 0;
+  targets.forEach(function (target) {
+    if (!fs.existsSync(target.file)) {
+      console.log('跳过（不存在）: ' + target.file);
+      return;
+    }
+    try {
+      fs.rmSync(target.file, { recursive: true, force: true });
+      removed++;
+      console.log('已删除' + target.label + ': ' + target.file);
+    } catch (e) {
+      failed++;
+      console.error('删除失败' + target.label + ': ' + target.file + ' - ' + e.message);
+    }
+  });
+  console.log(failed ? ('清理未完成，失败 ' + failed + ' 项') : ('清理完成，共删除 ' + removed + ' 项'));
+  return failed ? 1 : 0;
+}
+
 var cli = parseCli(process.argv.slice(2));
-var configFile = configLib.resolvePath(cli.configFile || 'config.json', __dirname);
+var defaultConfig = fs.existsSync(path.join(__dirname, 'config', 'config.json'))
+  ? path.join('config', 'config.json')
+  : 'config.json';
+
+if (cli.deleteAll) {
+  var conflicts = process.argv.slice(2).filter(function (arg) {
+    return arg !== '--delete' && arg !== '--delte';
+  });
+  if (conflicts.length) {
+    console.error('--delete 必须单独使用，不能与以下参数同时出现: ' + conflicts.join(', '));
+    process.exit(1);
+  }
+  process.exit(deleteAllGeneratedData());
+}
+
+var configFile = configLib.resolvePath(cli.configFile || defaultConfig, __dirname);
 var resolved;
 try {
   resolved = configLib.resolveConfig(configLib.loadRaw(configFile));
 } catch (e) {
   console.error('无法读取/解析 ' + configFile + ': ' + e.message);
   process.exit(1);
+}
+
+if (cli.sso) {
+  try {
+    cli.sso = normaliseSsoMode(cli.sso);
+    resolved.accounts.forEach(function (account) {
+      account.authMode = cli.sso;
+    });
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
+}
+if (cli.dryRun != null) {
+  resolved.accounts.forEach(function (account) {
+    account.dryRun = cli.dryRun;
+  });
 }
 
 if (cli.help) {
@@ -134,6 +230,10 @@ function SessionError(message) { this.name = 'SessionError'; this.message = mess
 SessionError.prototype = Object.create(Error.prototype);
 SessionError.prototype.constructor = SessionError;
 
+function NotPreparedError(message) { this.name = 'NotPreparedError'; this.message = message || '尚未准备登录会话'; }
+NotPreparedError.prototype = Object.create(Error.prototype);
+NotPreparedError.prototype.constructor = NotPreparedError;
+
 function NoClassError(message) { this.name = 'NoClassError'; this.message = message || '无可用教学班'; }
 NoClassError.prototype = Object.create(Error.prototype);
 NoClassError.prototype.constructor = NoClassError;
@@ -144,45 +244,36 @@ function loadJson(file) {
   try { return JSON.parse(fs.readFileSync(configLib.resolvePath(file, __dirname), 'utf8')); } catch (e) { return null; }
 }
 
-function saveJson(file, obj) {
+function saveJson(file, obj, secure) {
   try {
     var full = configLib.resolvePath(file, __dirname);
     configLib.ensureParent(full);
     fs.writeFileSync(full, JSON.stringify(obj, null, 2), 'utf8');
+    if (secure) {
+      try { fs.chmodSync(full, 0o600); } catch (e) {}
+    }
   } catch (e) {
     if (log) log('写入文件失败: ' + file + ' - ' + e.message, 'warn');
   }
 }
 
-var lastSessionFingerprint = '';
-var lastSessionSavedAt = 0;
+var sessionCaptured = false;
 async function saveSession(context, statePath, reason) {
+  if (sessionCaptured) return false;
   try {
     var state = await context.storageState();
     var cookies = state && Array.isArray(state.cookies) ? state.cookies : [];
     if (!cookies.length) return false;
 
-    // 只有 Cookie/存储发生变化时才重复写盘；状态值不会进入日志。
-    var fingerprint = cookies.map(function (c) {
-      return [c.domain || '', c.path || '', c.name || '', c.value || ''].join('\t');
-    }).join('\n');
-    var periodic = /更新|会话$/.test(reason || '');
-    if (fingerprint === lastSessionFingerprint) return false;
-    if (periodic && Date.now() - lastSessionSavedAt < 2000) return false;
-
     configLib.ensureParent(statePath);
     fs.writeFileSync(statePath, JSON.stringify(state, null, 2), 'utf8');
     try { fs.chmodSync(statePath, 0o600); } catch (e) {}
-    var firstSave = !lastSessionFingerprint;
-    lastSessionFingerprint = fingerprint;
-    lastSessionSavedAt = Date.now();
+    sessionCaptured = true;
     var names = cookies.map(function (c) { return c.name; }).filter(function (v, i, all) {
       return v && all.indexOf(v) === i;
     });
-    if (!periodic || firstSave) {
-      log('✓ 登录会话已保存: ' + statePath + ' (' + cookies.length + ' 个 Cookie: ' + names.join(', ') + ')' +
-        (reason ? ' [' + reason + ']' : ''), 'ok');
-    }
+    log('✓ 登录会话已保存一次: ' + statePath + ' (' + cookies.length + ' 个 Cookie: ' + names.join(', ') + ')' +
+      (reason ? ' [' + reason + ']' : ''), 'ok');
     return true;
   } catch (e) {
     log('保存登录会话失败: ' + e.message, 'warn');
@@ -194,7 +285,7 @@ function saveTemplates() {
   var out = params.deepCopy(templates);
   delete out.pendingRequests;
   delete out.warnings;
-  saveJson(cfg.templatesFile || 'templates.json', out);
+  saveJson(cfg.templatesFile || path.join('state', 'templates.json'), out, true);
 }
 
 function hasCapturedTemplates() {
@@ -202,7 +293,7 @@ function hasCapturedTemplates() {
   return !!(templates.ctx || templates.query || templates.detail || templates.submit || templates.drop || learned);
 }
 
-function loadState() { return loadJson(cfg.stateFile || 'state.json'); }
+function loadState() { return loadJson(cfg.stateFile || path.join('state', 'state.json')); }
 
 // indexPath 在旧配置里指选课首页；有些学校把登录入口放在门户页，
 // 这时用 loginPath 登录，登录后再跳到 selectionPath。
@@ -215,6 +306,16 @@ function selectionPath() {
 }
 
 function loginPath() {
+  var mode = String(cfg.authMode || '').toLowerCase();
+  if (mode === 'zfsoft') {
+    return cfg.zfsoftLoginPath || '/xtgl/login_slogin.html';
+  }
+  if (cfg.ssoPath) return cfg.ssoPath;
+  if (cfg.loginPath) return cfg.loginPath;
+  // WEngine 反代不能回退到选课首页，否则会直接触发正方二段登录。
+  if (mode === 'wengine') {
+    try { return new URL(cfg.base).origin + '/sso/lyiotlogin'; } catch (e) { return '/sso/lyiotlogin'; }
+  }
   return cfg.loginPath || cfg.indexPath || selectionPath();
 }
 
@@ -231,12 +332,15 @@ function refererUrl() {
 }
 
 function loginUrl() {
-  return pageUrl(loginPath(), !apiLib.isAbsolute(cfg.loginPath));
+  return apiLib.resolveUrl(cfg.base, loginPath());
 }
 
 function ssoUrl() {
-  if (!cfg.ssoPath) return '';
-  return apiLib.resolveUrl(cfg.base, cfg.ssoPath);
+  var pathValue = cfg.ssoPath || cfg.loginPath;
+  if (!pathValue && String(cfg.authMode || '').toLowerCase() === 'wengine') {
+    try { pathValue = new URL(cfg.base).origin + '/sso/lyiotlogin'; } catch (e) { pathValue = '/sso/lyiotlogin'; }
+  }
+  return pathValue ? apiLib.resolveUrl(cfg.base, pathValue) : '';
 }
 
 function selectionUrl() {
@@ -278,7 +382,7 @@ async function makeRequestContext() {
   var opts = { extraHTTPHeaders: apiHeaders() };
   var st = loadState();
   if (st && Array.isArray(st.cookies) && st.cookies.length) {
-    opts.storageState = configLib.resolvePath(cfg.stateFile || 'state.json', __dirname);
+    opts.storageState = configLib.resolvePath(cfg.stateFile || path.join('state', 'state.json'), __dirname);
   }
   return await getPlaywright().request.newContext(opts);
 }
@@ -842,6 +946,7 @@ async function isInAcademicSystem(page) {
 // 部分 WEngine 站点在统一认证回跳后仍会落到正方 login_slogin.html；
 // 再走一次学校提供的 SSO 接入口即可复用 WEngine 身份继续登录。
 async function resumeViaSso(page) {
+  if (String(cfg.authMode || '').toLowerCase() === 'zfsoft') return false;
   var target = ssoUrl();
   if (!target || ssoAttempts >= 2 || Date.now() < ssoRetryAt) return false;
   var current = page.url();
@@ -867,43 +972,66 @@ async function resumeViaSso(page) {
 /* ---------------------------- 登录与会话 ---------------------------- */
 
 async function ensureLogin() {
-  // 1) 已有模板 + 会话 → 先探测是否仍有效
-  var savedTpl = loadJson(cfg.templatesFile || 'templates.json');
+  // 普通运行只允许复用 --prepare 生成的结果，不再自动打开登录浏览器。
+  var savedTpl = loadJson(cfg.templatesFile || path.join('state', 'templates.json'));
   if (savedTpl) {
     ['ctx', 'display', 'query', 'detail', 'submit', 'drop', 'choosed', 'xkkz', 'api', 'meta', 'responses'].forEach(function (k) {
       if (savedTpl[k]) templates[k] = params.deepCopy(savedTpl[k]);
     });
   }
-  if (!cli.forceLogin && !cli.capture && templates.ctx && templates.query && loadState()) {
-    log('发现已保存模板与会话，探测会话有效性…', 'info');
-    var rc = await makeRequestContext();
-    try {
-      await apiPost(rc, 'choosed', params.fetchChoosedParams(templates), { allowHtml: true });
-      log('✓ 会话有效，直接进入抢课循环', 'ok');
-      return rc;
-    } catch (e) {
-      log(e instanceof SessionError ? '会话已过期，需要重新登录' : '会话复用探测失败: ' + e.message, 'warn');
-      try { await rc.dispose(); } catch (e2) {}
-    }
+  var savedState = loadState();
+  var missing = [];
+  if (!savedState || !Array.isArray(savedState.cookies) || !savedState.cookies.length) {
+    missing.push('Cookie 会话 ' + (cfg.stateFile || path.join('state', 'state.json')));
   }
-  return doLogin();
+  if (!savedTpl) {
+    missing.push('模板文件 ' + (cfg.templatesFile || path.join('state', 'templates.json')));
+  } else if (!templates.ctx || !templates.query) {
+    missing.push('模板中的 ctx/query 数据');
+  }
+  if (missing.length) {
+    throw new NotPreparedError('准备结果不完整，缺少: ' + missing.join('；') +
+      '。请重新运行: node grab.js --prepare --sso zfsoft|wengine');
+  }
+
+  log('加载准备结果，探测会话有效性…', 'info');
+  var rc = await makeRequestContext();
+  try {
+    await apiPost(rc, 'choosed', params.fetchChoosedParams(templates), { allowHtml: true });
+    log('✓ 已准备的会话有效，进入抢课循环', 'ok');
+    return rc;
+  } catch (e) {
+    try { await rc.dispose(); } catch (e2) {}
+    var detail = e instanceof SessionError ? '会话已过期' : ('会话探测失败: ' + e.message);
+    throw new NotPreparedError(detail + '。请重新运行: node grab.js --prepare --sso zfsoft|wengine');
+  }
 }
 
 async function doLogin() {
   log('== 需要登录 ==', 'info');
   log('即将弹出浏览器打开登录入口。', 'info');
+  var loginModeLabel = String(cfg.authMode || '').toLowerCase() === 'zfsoft'
+    ? '正方原生'
+    : (String(cfg.authMode || '').toLowerCase() === 'wengine' ? '反向代理/WEngine' : '自动识别');
+  log('登录方式: ' + loginModeLabel, 'info');
   if (cfg.login && cfg.login.username) {
     log('已配置账号 ' + cfg.login.username + '，将自动填充登录表单。', 'info');
   } else {
-    log('未配置账号（config.json 的 login），请手动登录。', 'info');
+    log('未配置账号（config/config.json 的 login），请手动登录。', 'info');
   }
   log('若登录页有验证码，请在浏览器里补上并点登录。', 'info');
   log('登录后会自动跳到选课页，脚本在后台采集请求参数。', 'info');
-  log('检测到模板就绪后，本工具自动进入抢课循环。', 'info');
+  log(cli.capture
+    ? '抓包完成后按 Enter 保存并退出。'
+    : '登录 Cookie 只采集一次；模板就绪后关闭浏览器并退出 --prepare。', 'info');
 
   var browser = await getPlaywright().chromium.launch({ headless: cli.capture ? false : !!cfg.headless });
-  var st = loadState();
-  var statePath = configLib.resolvePath(cfg.stateFile || 'state.json', __dirname);
+  var closingBrowser = false;
+  browser.on('disconnected', function () {
+    if (!closingBrowser) log('登录浏览器连接已断开（窗口被关闭或浏览器进程退出）', 'warn');
+  });
+  var st = cli.forceLogin ? null : loadState();
+  var statePath = configLib.resolvePath(cfg.stateFile || path.join('state', 'state.json'), __dirname);
   var contextOptions = {
     // 反向代理会把正方登录页脚本改写到 webauth 域，页面自带 CSP 会拦截这些原站脚本，
     // 导致 body 一直 display:none、表单不出现。这里仅放宽浏览器端 CSP，服务器认证仍照常执行。
@@ -913,6 +1041,12 @@ async function doLogin() {
   var context = await browser.newContext(contextOptions);
   installProxyAssetRewrite(context);
   var page = await context.newPage();
+  page.on('close', function () {
+    if (!closingBrowser) log('登录浏览器页面已关闭；若关闭整个窗口，请重新运行并保持窗口打开', 'warn');
+  });
+  context.on('close', function () {
+    if (!closingBrowser) log('登录浏览器上下文已关闭', 'warn');
+  });
   attachCapture(page);
   attachDebug(page);
   context.on('page', function (p) {
@@ -972,7 +1106,7 @@ async function doLogin() {
 
   if (cli.capture) {
     log('抓包模式：请在浏览器里登录 → 进入选课页 → 查询一次 → 展开一门课 → （可选）提交/退选。', 'warn');
-    log('完成后回到终端按 Enter；程序会把接口路径、请求模板和响应样例写入 ' + (cfg.templatesFile || 'templates.json'), 'warn');
+    log('完成后回到终端按 Enter；程序会把接口路径、请求模板和响应样例写入 ' + (cfg.templatesFile || path.join('state', 'templates.json')), 'warn');
     await waitForEnter('完成后按 Enter 保存抓包结果… ');
     // 给尚未完成的 response.text() 一点时间落盘。
     await resumeViaSso(page);
@@ -1012,6 +1146,7 @@ async function doLogin() {
     if (await isInAcademicSystem(page)) {
       await saveSession(context, statePath, '超时前保留教务系统会话');
     }
+    closingBrowser = true;
     await browser.close();
     process.exit(1);
   }
@@ -1020,16 +1155,16 @@ async function doLogin() {
     await saveSession(context, statePath, cli.capture ? '抓包完成' : '模板就绪');
   }
   if (hasCapturedTemplates()) saveTemplates();
-  else log('没有抓到任何接口，保留原有 ' + (cfg.templatesFile || 'templates.json'), 'warn');
+  else log('没有抓到任何接口，保留原有 ' + (cfg.templatesFile || path.join('state', 'templates.json')), 'warn');
   printCaptureSummary();
-  var rc = cli.capture ? null : await makeRequestContext();
+  closingBrowser = true;
   await browser.close();
   if (cli.capture) {
-    log('抓包完成。把 ' + (cfg.templatesFile || 'templates.json') + ' 发回来即可继续适配。', 'ok');
+    log('抓包完成。把 ' + (cfg.templatesFile || path.join('state', 'templates.json')) + ' 发回来即可继续适配。', 'ok');
     process.exit(0);
   }
-  log('会话已保存（' + (cfg.stateFile || 'state.json') + '）。下次运行可跳过登录直接复用。', 'ok');
-  return rc;
+  log('会话已保存（' + (cfg.stateFile || path.join('state', 'state.json')) + '）。下次运行可跳过登录直接复用。', 'ok');
+  return null;
 }
 
 /* ---------------------------- 抢课循环 ---------------------------- */
@@ -1226,8 +1361,8 @@ function deps(rc) {
 function handleSessionExpired() {
   log('== 会话已过期 ==', 'err');
   log(cfg.headless
-    ? '服务器场景：请在本机重跑一次登录生成新的 ' + (cfg.stateFile || 'state.json') + ' 后传回服务器。'
-    : '请重新运行本工具并手动登录（会话会自动复用已保存模板）。', 'warn');
+    ? '服务器场景：请在本机重跑一次 --prepare 生成新的 ' + (cfg.stateFile || path.join('state', 'state.json')) + ' 后传回服务器。'
+    : '请重新运行: node grab.js --prepare --sso zfsoft|wengine', 'warn');
   notify('选课工具会话过期', '需要重新登录');
   process.exitCode = 2;
 }
@@ -1237,7 +1372,7 @@ async function runLoop(rc) {
   state.targets = built.list;
   state.njdm = built.njdm;
   if (!state.targets.length) {
-    log('没有配置目标课程：请编辑 config.json 的 targets（kch 课程号 / jxb 教学班ID / kw 关键词，至少填一个；njdm_id 年级过滤可选）', 'err');
+    log('没有配置目标课程：请编辑 config/config.json 的 targets（kch 课程号 / jxb 教学班ID / kw 关键词，至少填一个；njdm_id 年级过滤可选）', 'err');
     process.exitCode = 3;
     return;
   }
@@ -1259,18 +1394,26 @@ async function runLoop(rc) {
 function printHelp() {
   console.log([
     '用法:',
-    '  node grab.js                         单账号运行；多账号时并发启动全部账号',
-    '  node grab.js --prepare               逐账号登录/采集模板，完成后退出',
+    '  node grab.js --prepare --sso MODE    登录并采集 Cookie/模板，完成后退出',
+    '  node grab.js                         使用已准备结果运行（不能自动登录）',
     '  node grab.js --account <id>          只运行指定账号',
     '  node grab.js --capture [--account]   打开浏览器抓包，按 Enter 保存',
     '  node grab.js --import-har FILE       从 HAR 导入指定账号的模板',
     '  node grab.js --list-accounts         列出配置中的账号',
     '  node grab.js --config FILE           使用指定配置文件',
     '  node grab.js --force-login           忽略已保存会话，强制重新登录',
-    '  node grab.js --debug                输出详细登录/跳转/表单日志',
+    '  node grab.js --sso zfsoft            正方原生登录入口',
+    '  node grab.js --sso wengine           反向代理/WEngine 登录入口',
+    '  node grab.js --dryrun                强制干跑（只查询，不提交）',
+    '  node grab.js --dryrun=false          显式关闭干跑',
+    '  node grab.js --delete                清空配置、Cookie/模板和日志',
+    '  node grab.js --debug                 输出详细登录/跳转/表单日志',
     '  node grab.js --help                  显示本帮助',
     '',
-    '接口路径可在 config.json 的 api 字段覆盖，例如:',
+    '--sso 只能与 --prepare 或 --capture 一起使用。',
+    '--dryrun 只影响普通运行；未指定时使用配置里的 dryRun。',
+    '--delete 必须单独使用，不能与任何其他参数组合。',
+    '接口路径可在 config/config.json 的 api 字段覆盖，例如:',
     '  "api": { "query": "/xsxk/xxx.html?gnmkdm=N253512" }'
   ].join('\n'));
 }
@@ -1304,7 +1447,7 @@ async function runHarImport(file) {
   saveTemplates();
 
   log('HAR 导入完成: 共 ' + counts.entries + ' 条记录，识别 ' + JSON.stringify(counts.kinds), 'ok');
-  log('已写入 ' + (cfg.templatesFile || 'templates.json'), 'ok');
+  log('已写入 ' + (cfg.templatesFile || path.join('state', 'templates.json')), 'ok');
   printCaptureSummary();
   if (captureLib.missingKinds(templates).length) {
     log('如果缺少 query/detail/submit：请在 HAR 里确认包含对应 XHR 的 Request Payload 和 Response。', 'warn');
@@ -1323,12 +1466,22 @@ async function main() {
     await runHarImport(cli.har);
     return;
   }
-  var rc = await ensureLogin();
-  if (cli.prepare) {
-    log('账号准备完成：会话和模板已保存，可以开始并发运行。', 'ok');
-    try { await rc.dispose(); } catch (e) {}
+  if (cli.capture) {
+    await doLogin();
     return;
   }
+  if (cli.prepare) {
+    await doLogin();
+    log('账号准备完成：Cookie 已一次性保存，模板已写入，准备进程退出。', 'ok');
+    return;
+  }
+  if (cli.forceLogin) {
+    throw new NotPreparedError('--force-login 只能与 --prepare 一起使用');
+  }
+  if (cli.sso) {
+    throw new NotPreparedError('--sso 只能与 --prepare 或 --capture 一起使用');
+  }
+  var rc = await ensureLogin();
   await runLoop(rc);
 }
 
@@ -1346,7 +1499,7 @@ function fatal(e) {
     if (logger) log(stack, 'dim');
     else console.error(stack);
   }
-  process.exit(1);
+  process.exit(e instanceof NotPreparedError ? 4 : 1);
 }
 
 if (runAsSupervisor) {

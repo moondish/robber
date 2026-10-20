@@ -60,19 +60,22 @@
 
 ```bash
 npm install                      # 安装依赖（含 Playwright 浏览器）
-Copy-Item config.example.json config.json   # 生成配置（PowerShell）
-# 编辑 config.json：base 改成你的正方地址，填 targets 目标课程，可选填 login
-node grab.js                     # 启动（弹出浏览器手动登录后自动抢课）
+Copy-Item config/config.example.json config/config.json   # 生成配置（PowerShell）
+# 编辑 config/config.json：base 改成你的正方地址，填 targets 目标课程
+node grab.js --prepare --sso wengine   # 反代登录；正方原生入口用 --sso zfsoft
+node grab.js --dryrun                  # 干跑：只查询和匹配，不提交
+node grab.js --dryrun=false            # 实跑：允许自动提交
 ```
 
-首次运行会弹出浏览器，登录选课页一次（验证码人工处理），之后会话自动复用。
+首次必须先执行 `--prepare`。浏览器完成登录并采集 Cookie/请求模板后会自动关闭、退出准备进程；此后普通运行不会再次打开登录浏览器。若未准备，`node grab.js` 会直接报错。
 
-多账号使用 `config.multi.example.json`，每个账号独立 `state` / `templates` / 日志：
+所有账号（包括只有一个账号）统一使用 `accounts[]`。仅保留一个 `config/config.example.json`，在其中添加多个 `accounts[]` 条目即可切换为多账号；每个账号独立 `state` / `templates` / 日志：
 
 ```bash
-node grab.js --prepare          # 逐账号登录，生成各自会话
+node grab.js --prepare --sso wengine  # 逐账号登录，生成各自会话
 node grab.js --list-accounts    # 查看账号和文件路径
-node grab.js                    # 并发启动全部账号
+node grab.js --dryrun           # 使用准备结果并发干跑
+node grab.js --dryrun=false     # 并发实跑
 ```
 
 如果换学校/换系统版本后一直提示“等待模板”，维护者可以用抓包/HAR 诊断；普通用户不需要自己抓包：
@@ -83,28 +86,29 @@ node grab.js --capture           # 浏览器里登录并操作一遍，回终端
 node grab.js --import-har 选课.har
 ```
 
-抓包会自动识别查询、详情、提交、已选、退选等接口，并写入对应账号的 templates 文件（单账号 `templates.json`，多账号 `state/<id>.templates.json`）。具体要抓哪些请求见 [docs/抓包清单.md](docs/抓包清单.md)。
+抓包会自动识别查询、详情、提交、已选、退选等接口，并写入对应账号的 `state/<id>.templates.json`。具体要抓哪些请求见 [docs/抓包清单.md](docs/抓包清单.md)。
 
 ## 配置说明
 
-编辑 `config.json`：
+编辑 `config/config.json`：
 
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `base` | 必填 | 正方系统根地址，如 `https://<your-host>/jwglxt`；仓库不写死学校地址 |
 | `indexPath` | `/xsxk/zzxkyzb_cxZzxkYzbIndex.html` | 选课首页路径 |
 | `loginPath` | 同 `indexPath` | 登录入口；如果登录先经过门户/统一认证页，填这里 |
+| `zfsoftLoginPath` | `/xtgl/login_slogin.html` | 使用 `--sso zfsoft` 时的正方原生登录入口 |
 | `ssoPath` | 空 | 反代认证后仍需续登时使用的 SSO 接入口，可写完整 URL |
 | `selectionPath` | 自动推导 | 登录后要跳转的选课页；留空时使用 `indexPath` 或默认选课路径 |
 | `gnmkdm` | `N253512` | 功能模块号，按学校系统填写 |
-| `targets.kch` | `""` | 课程号（纯数字），如 `207786` |
-| `targets.jxb` | `""` | 教学班 ID（32 位十六进制） |
-| `targets.kw` | `""` | 关键词（课程名/教学班名包含） |
-| `targets.njdm_id` | `2025` | 年级过滤，留空=不过滤 |
-| `login.username` / `login.password` | `""` | 登录账号密码（选填） |
+| `accounts[].targets.kch` | `""` | 课程号（纯数字），如 `207786` |
+| `accounts[].targets.jxb` | `""` | 教学班 ID（32 位十六进制） |
+| `accounts[].targets.kw` | `""` | 关键词（课程名/教学班名包含） |
+| `accounts[].targets.njdm_id` | `2025` | 年级过滤，留空=不过滤 |
+| `accounts[].login.username/password` | `""` | 登录账号密码（选填） |
 | `intervalSec` | `2.5` | 查询间隔秒数，勿低于 1.5 |
 | `kklxdm` | `10` | 课程类别（10=通识选修） |
-| `dryRun` | `true` | `true`=只监控不提交；`false`=实跑自动选课 |
+| `dryRun` | `true` | 配置文件兜底值；命令行 `--dryrun` / `--dryrun=false` 优先 |
 | `api` | `{}` | 覆盖接口路径，如 `{"query":"/xsxk/xxx.html?gnmkdm=N253512"}`；显式填写优先，留空时用抓包结果 |
 | `appendGnmkdm` | `true` | 自动给接口 URL 补 `gnmkdm`；若本校接口不接受可设 `false` |
 | `requestTimeoutSec` | `30` | 单次接口请求超时 |
@@ -114,18 +118,21 @@ node grab.js --import-har 选课.har
 | `bypassProxyCSP` | `true` | 反代改写登录页脚本时放宽浏览器 CSP，避免二段登录表单被拦截 |
 | `debug` | `false` | 详细调试日志；也可用命令行 `--debug` 临时开启 |
 | `debugFile` | 自动 | 调试日志路径；留空时按 `logFile` 生成 `*.debug.log` |
+| `accounts[].stateFile` | `state/<id>.state.json` | 账号 Cookie/会话文件 |
+| `accounts[].templatesFile` | `state/<id>.templates.json` | 账号接口模板文件 |
+| `accounts[].logFile` | `logs/<id>.log` | 账号日志文件 |
 | `notify.webhook` | `""` | 成功/会话过期推送 URL（ServerChan/PushPlus 类） |
 | `notify.beep` | `true` | 成功/失败时控制台提示音 |
-| `accounts[]` | 无 | 多账号列表；每个账号可覆盖 `base/login/targets/intervalSec/api` 等字段 |
+| `accounts[]` | 必填 | 账号数组；旧顶层单账号配置已弃用 |
 | `concurrency` | 账号数 | 同时运行的账号数，默认全部并发 |
 | `restartDelaySec` | `15` | 账号异常退出后的重启间隔 |
-| `maxRestarts` | `5` | 单账号最大自动重启次数 |
+| `maxRestarts` | `5` | 每个账号最大自动重启次数 |
 
-> 单账号使用 `state.json` / `templates.json`；多账号默认使用 `state/<id>.state.json`、`state/<id>.templates.json`、`logs/<id>.log`，不会互相覆盖。
+> 所有账号默认使用 `state/<id>.state.json`、`state/<id>.templates.json`、`logs/<id>.log`，不会互相覆盖。
 
 ## 多账号并发
 
-复制 `config.multi.example.json` 为 `config.json`，填写公共 `base` 和每个账号的 `login` / `targets`：
+复制 `config/config.example.json` 为 `config/config.json`，在 `accounts[]` 中增加账号，并填写公共 `base` 和每个账号的 `login` / `targets`：
 
 ```json
 {
@@ -139,8 +146,8 @@ node grab.js --import-har 选课.har
 }
 ```
 
-- 第一次先运行 `node grab.js --prepare`，逐个账号登录并保存会话；避免同时弹出多个浏览器。
-- 之后运行 `node grab.js`，每个账号一个独立子进程，各自轮询、选课、冲突处理和通知。
+- 第一次先运行 `node grab.js --prepare --sso wengine`，逐个账号登录并保存会话；避免同时弹出多个浏览器。
+- 之后先运行 `node grab.js --dryrun` 核对命中；确认后使用 `node grab.js --dryrun=false` 实跑。
 - 只跑某个账号：`node grab.js --account a1`。
 - 只给某个账号抓包/导入 HAR：`node grab.js --capture --account a1`、`node grab.js --import-har 选课.har --account a1`。
 - 账号异常退出会自动重启；会话过期退出码为 2，不会盲目重启，需要重新 `--prepare` 该账号。
@@ -148,9 +155,20 @@ node grab.js --import-har 选课.har
 
 ## 会话与无人值守
 
-- 登录成功即把会话写入 `state.json`，下次运行直接复用，无需再登；会话过期自动检测并提示重登。
-- 多账号模式每个账号写入各自的 `state/<id>.state.json`；首次部署先 `node grab.js --prepare`。
-- **服务器部署**：本地登录一次 → 把整个目录（含 `state.json`、`templates.json`、`config.json`）拷到服务器 → `headless: true` + `dryRun: false` 运行 → 配好 `notify.webhook` 收通知。
+- 进入正方教务系统后只采集一次 Cookie，并写入对应账号的 `state/<id>.state.json`；准备阶段随后采集模板并退出。
+- 普通运行只复用准备结果；会话过期会退出并提示重新执行 `--prepare`，不会自动弹浏览器。
+- 多账号模式每个账号写入各自的 `state/<id>.state.json`；首次部署先 `node grab.js --prepare --sso zfsoft|wengine`。
+- **服务器部署**：本地 `--prepare` 一次 → 拷贝 `config/config.json`、`state/`、`logs/` → `node grab.js --dryrun` 验证 → `--dryrun=false` 实跑 → 配好 `notify.webhook` 收通知。
+
+## 清空配置
+
+以下命令会删除默认配置、所有账号 Cookie/模板、日志及旧版根目录运行时文件，但不会删除示例配置和源码：
+
+```bash
+node grab.js --delete
+```
+
+`--delete` 必须单独使用；与 `--prepare`、`--sso`、`--account`、`--dryrun`、`--capture`、`--config` 等参数组合会直接报错，不执行删除。
 
 ## 冲突自动重选
 
@@ -175,11 +193,11 @@ npm test                         # 运行单元测试（node lib/self_test.js）
 - [docs/开发计划2.md](docs/开发计划2.md) — 本独立工具实现方案
 - ~~[docs/开发计划.md](docs/开发计划.md) — 油猴脚本版方案（首版，已弃用）~~
 
-> ⚠️ `config.json`（含账号密码）、`state.json`（含会话 cookie）、`templates.json` 等敏感/运行时文件已被 `.gitignore` 忽略，请勿提交。
+> ⚠️ `config/config.json`（含账号密码）、`state/`（含 Cookie 和模板）等敏感/运行时文件已被 `.gitignore` 忽略，请勿提交。
 
 ## 接口适配更新
 
-- 接口路径集中到 `lib/api.js`，不再散落在主流程里；`config.json` 的 `api` 显式覆盖优先，留空时使用抓包自动学习的结果。
+- 接口路径集中到 `lib/api.js`，不再散落在主流程里；`config/config.json` 的 `api` 显式覆盖优先，留空时使用抓包自动学习的结果。
 - 新增 `node grab.js --capture` 和 `node grab.js --import-har`，可从真实页面/HAR 自动学习路径、请求模板和响应结构。
 - 兼容新版页面的 `cxZzxkYzbDisplay.html` 初始加载和 `cxZzxkYzbChoosed.html` HTML 已选列表（旧版 `ChoosedDisplay` JSON 仍可用）。
 - 提交前若抓到 `cxXkTitleMsg` 模板，会先走前置探针；退选后会刷新批次并重新获取 `do_jxb_id` 再重试。

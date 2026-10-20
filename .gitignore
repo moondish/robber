@@ -3,6 +3,8 @@ node_modules/
 
 # 运行时生成 / 敏感文件（勿提交）
 config.json
+config/config.json
+config/*.local.json
 state.json
 templates.json
 state/

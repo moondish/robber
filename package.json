@@ -7,7 +7,12 @@
   "main": "grab.js",
   "scripts": {
     "start": "node grab.js",
+    "prepare": "node grab.js --prepare",
+    "prepare:zfsoft": "node grab.js --prepare --sso zfsoft",
+    "prepare:wengine": "node grab.js --prepare --sso wengine",
     "prepare-accounts": "node grab.js --prepare",
+    "dryrun": "node grab.js --dryrun",
+    "delete": "node grab.js --delete",
     "accounts": "node grab.js --list-accounts",
     "capture": "node grab.js --capture",
     "import-har": "node grab.js --import-har",

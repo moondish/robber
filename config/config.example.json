@@ -2,6 +2,7 @@
   "base": "https://jwglxt.example.edu.cn/jwglxt",
   "indexPath": "/xsxk/zzxkyzb_cxZzxkYzbIndex.html",
   "loginPath": "",
+  "zfsoftLoginPath": "/xtgl/login_slogin.html",
   "ssoPath": "",
   "selectionPath": "",
   "gnmkdm": "N253512",
@@ -20,8 +21,6 @@
   "intervalSec": 2.5,
   "kklxdm": "10",
   "dryRun": true,
-  "debug": false,
-  "debugFile": "",
   "headless": false,
   "loginTimeoutMin": 5,
   "requestTimeoutSec": 30,
@@ -29,13 +28,8 @@
   "authMode": "auto",
   "rewriteProxyAssets": true,
   "bypassProxyCSP": true,
-  "notify": {
-    "webhook": "",
-    "beep": true
-  },
-  "concurrency": 2,
-  "restartDelaySec": 15,
-  "maxRestarts": 5,
+  "debug": false,
+  "debugFile": "",
   "accounts": [
     {
       "id": "account1",
@@ -49,19 +43,10 @@
         "kw": "",
         "njdm_id": "2025"
       }
-    },
-    {
-      "id": "account2",
-      "login": {
-        "username": "",
-        "password": ""
-      },
-      "targets": {
-        "kch": "",
-        "jxb": "",
-        "kw": "",
-        "njdm_id": "2025"
-      }
     }
-  ]
+  ],
+  "notify": {
+    "webhook": "",
+    "beep": true
+  }
 }
