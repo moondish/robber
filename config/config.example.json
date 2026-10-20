@@ -20,7 +20,6 @@
   },
   "intervalSec": 2.5,
   "kklxdm": "10",
-  "dryRun": true,
   "headless": false,
   "loginTimeoutMin": 5,
   "requestTimeoutSec": 30,

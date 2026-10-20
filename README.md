@@ -65,14 +65,13 @@ npm install                      # 安装依赖（含 Playwright 浏览器）
 Copy-Item config/config.example.json config/config.json   # 生成配置（PowerShell）
 # 编辑 config/config.json：base 改成你的正方地址，填 targets 目标课程
 node grab.js --prepare --sso wengine   # 反代登录；正方原生入口用 --sso zfsoft
-node grab.js --prepare --prewarm --sso wengine  # 开抢前预热会话/学生上下文
 node grab.js --dryrun                  # 干跑：只查询和匹配，不提交
-node grab.js --dryrun=false            # 实跑：允许自动提交
+node grab.js                           # 实跑：允许自动提交
 ```
 
 首次必须先执行 `--prepare`。浏览器完成登录并采集 Cookie/请求模板后会自动关闭、退出准备进程；此后普通运行不会再次打开登录浏览器。若未准备，`node grab.js` 会直接报错。
 
-`--prewarm` 可在选课开放前提前准备：拿到 Cookie 和学生上下文后即可退出。正式运行时由首次有效查询补齐查询模板与 `xkkz_id`；教学班加密 ID `do_jxb_id` 仍会在每次选课时实时获取。
+`--prepare` 会采集当前环境所有可获得的 Cookie、学生上下文和请求模板。查询模板、`xkkz_id`、`do_jxb_id` 等只能在开抢阶段取得的数据由运行时动态补齐，不需要等到那时才完成准备。
 
 所有账号（包括只有一个账号）统一使用 `accounts[]`。仅保留一个 `config/config.example.json`，在其中添加多个 `accounts[]` 条目即可切换为多账号；每个账号独立 `state` / `templates` / 日志：
 
@@ -80,7 +79,7 @@ node grab.js --dryrun=false            # 实跑：允许自动提交
 node grab.js --prepare --sso wengine  # 逐账号登录，生成各自会话
 node grab.js --list-accounts    # 查看账号和文件路径
 node grab.js --dryrun           # 使用准备结果并发干跑
-node grab.js --dryrun=false     # 并发实跑
+node grab.js                    # 使用准备结果并发实跑
 ```
 
 如果换学校/换系统版本后一直提示“等待模板”，维护者可以用抓包/HAR 诊断；普通用户不需要自己抓包：
@@ -113,7 +112,6 @@ node grab.js --import-har 选课.har
 | `accounts[].login.username/password` | `""` | 登录账号密码（选填） |
 | `intervalSec` | `2.5` | 查询间隔秒数，勿低于 1.5 |
 | `kklxdm` | `10` | 课程类别（10=通识选修） |
-| `dryRun` | `true` | 配置文件兜底值；命令行 `--dryrun` / `--dryrun=false` 优先 |
 | `api` | `{}` | 覆盖接口路径，如 `{"query":"/xsxk/xxx.html?gnmkdm=N253512"}`；显式填写优先，留空时用抓包结果 |
 | `appendGnmkdm` | `true` | 自动给接口 URL 补 `gnmkdm`；若本校接口不接受可设 `false` |
 | `requestTimeoutSec` | `30` | 单次接口请求超时 |
@@ -152,7 +150,7 @@ node grab.js --import-har 选课.har
 ```
 
 - 第一次先运行 `node grab.js --prepare --sso wengine`，逐个账号登录并保存会话；避免同时弹出多个浏览器。
-- 之后先运行 `node grab.js --dryrun` 核对命中；确认后使用 `node grab.js --dryrun=false` 实跑。
+- 之后先运行 `node grab.js --dryrun` 核对命中；确认后直接运行 `node grab.js` 实跑。
 - 只跑某个账号：`node grab.js --account a1`。
 - 只给某个账号抓包/导入 HAR：`node grab.js --capture --account a1`、`node grab.js --import-har 选课.har --account a1`。
 - 账号异常退出会自动重启；会话过期退出码为 2，不会盲目重启，需要重新 `--prepare` 该账号。
@@ -163,7 +161,7 @@ node grab.js --import-har 选课.har
 - 进入正方教务系统后只采集一次 Cookie，并写入对应账号的 `state/<id>.state.json`；准备阶段随后采集模板并退出。
 - 普通运行只复用准备结果；会话过期会退出并提示重新执行 `--prepare`，不会自动弹浏览器。
 - 多账号模式每个账号写入各自的 `state/<id>.state.json`；首次部署先 `node grab.js --prepare --sso zfsoft|wengine`。
-- **服务器部署**：本地 `--prepare` 一次 → 拷贝 `config/config.json`、`state/`、`logs/` → `node grab.js --dryrun` 验证 → `--dryrun=false` 实跑 → 配好 `notify.webhook` 收通知。
+- **服务器部署**：本地 `--prepare` 一次 → 拷贝 `config/config.json`、`state/`、`logs/` → `node grab.js --dryrun` 验证 → `node grab.js` 实跑 → 配好 `notify.webhook` 收通知。
 
 ## 清空配置
 

@@ -36,12 +36,12 @@ function parseCli(argv) {
     help: false,
     listAccounts: false,
     prepare: false,
-    prewarm: false,
     forceLogin: false,
     debug: false,
     sso: null,
     dryRun: null,
     deleteAll: false,
+    invalidArgs: [],
     account: null,
     configFile: null
   };
@@ -51,20 +51,18 @@ function parseCli(argv) {
     else if (a === '--help' || a === '-h') out.help = true;
     else if (a === '--list-accounts') out.listAccounts = true;
     else if (a === '--prepare') out.prepare = true;
-    else if (a === '--prewarm') out.prewarm = true;
     else if (a === '--force-login') out.forceLogin = true;
     else if (a === '--debug' || a === '--verbose' || a === '-d') out.debug = true;
-    else if (a === '--dryrun' || a === '--dry-run') {
-      var dryValue = argv[i + 1];
-      if (dryValue && /^(true|false)$/i.test(dryValue)) {
-        out.dryRun = /^true$/i.test(dryValue);
-        i++;
-      } else {
-        out.dryRun = true;
+    else if (a === '--dryrun') {
+      out.dryRun = true;
+      if (argv[i + 1] && /^(true|false)$/i.test(argv[i + 1])) {
+        out.invalidArgs.push(a + ' ' + argv[++i]);
       }
     }
-    else if (/^--dry-?run=(true|false)$/i.test(a)) out.dryRun = /=(true)$/i.test(a);
-    else if (a === '--no-dryrun' || a === '--no-dry-run') out.dryRun = false;
+    else if (a === '--prewarm' || a === '--dry-run' || /^--dry-?run=/.test(a) ||
+      a === '--no-dryrun' || a === '--no-dry-run') {
+      out.invalidArgs.push(a);
+    }
     else if (a === '--delete' || a === '--delte') out.deleteAll = true;
     else if (a === '--sso') {
       var ssoValue = argv[i + 1];
@@ -126,6 +124,11 @@ function deleteAllGeneratedData() {
 }
 
 var cli = parseCli(process.argv.slice(2));
+if (cli.invalidArgs.length) {
+  console.error('已移除以下参数: ' + cli.invalidArgs.join(', ') +
+    '。干跑请使用 --dryrun，实跑直接运行 node grab.js。');
+  process.exit(1);
+}
 var defaultConfig = fs.existsSync(path.join(__dirname, 'config', 'config.json'))
   ? path.join('config', 'config.json')
   : 'config.json';
@@ -161,12 +164,6 @@ if (cli.sso) {
     process.exit(1);
   }
 }
-if (cli.dryRun != null) {
-  resolved.accounts.forEach(function (account) {
-    account.dryRun = cli.dryRun;
-  });
-}
-
 if (cli.help) {
   printHelp();
   process.exit(0);
@@ -221,7 +218,7 @@ var state = cfg ? {
   targets: [],
   njdm: [],      // 年级过滤（来自 targets.njdm_id）
   querying: false,
-  dryRun: !!cfg.dryRun,
+  dryRun: !!cli.dryRun,
   interval: cfg.intervalSec >= 1 ? cfg.intervalSec : 2.5,
   kklxdm: String(cfg.kklxdm || '10'),
   succeeded: false,
@@ -1045,11 +1042,6 @@ async function ensureLogin() {
   if (!savedState || !Array.isArray(savedState.cookies) || !savedState.cookies.length) {
     missing.push('Cookie 会话 ' + (cfg.stateFile || path.join('state', 'state.json')));
   }
-  if (!savedTpl) {
-    missing.push('模板文件 ' + (cfg.templatesFile || path.join('state', 'templates.json')));
-  } else if (!templates.ctx) {
-    missing.push('模板中的 ctx 学生上下文');
-  }
   if (missing.length) {
     throw new NotPreparedError('准备结果不完整，缺少: ' + missing.join('；') +
       '。请重新运行: node grab.js --prepare --sso zfsoft|wengine');
@@ -1057,6 +1049,10 @@ async function ensureLogin() {
 
   log('加载准备结果，探测会话有效性…', 'info');
   var rc = await makeRequestContext();
+  if (!templates.ctx) {
+    log('学生上下文将在选课开放后动态获取', 'info');
+    return rc;
+  }
   try {
     await apiPost(rc, 'choosed', params.fetchChoosedParams(templates), { allowHtml: true });
     log('✓ 已准备的会话有效，进入抢课循环', 'ok');
@@ -1160,8 +1156,10 @@ async function doLogin() {
   log('当前页面: ' + page.url(), 'info');
   await resumeViaSso(page);
   await handleLoginPage(page);
+  var academicReady = false;
   var initialSelection = await ensureSelectionPage(page);
   if (initialSelection || await isInAcademicSystem(page)) {
+    academicReady = true;
     await saveSession(context, statePath, '进入教务系统');
     await capturePageContext(page);
   }
@@ -1187,18 +1185,21 @@ async function doLogin() {
     await handleLoginPage(page);
     var loopSelection = await ensureSelectionPage(page);
     if (loopSelection || await isInAcademicSystem(page)) {
+      academicReady = true;
       await saveSession(context, statePath, '教务系统会话更新');
       await capturePageContext(page);
     }
-    if (templates.ctx && (templates.query || cli.prewarm)) break;
-    if (templates.ctx && !templates.query && triggered < 3) {
+    if (academicReady && !templates.query && triggered < 3) {
       await tryTriggerQuery(page);
       triggered++;
+      await params.sleep(1000);
+      continue;
     }
+    if (academicReady) break;
     await params.sleep(1000);
   }
 
-  var preparationReady = templates.ctx && (templates.query || cli.prewarm);
+  var preparationReady = academicReady && sessionCaptured;
   if (!cli.capture && !preparationReady) {
     log('超时未检测到可用的学生上下文/模板：请确认已登录并进入教务系统。', 'err');
     log('已抓到的接口: ' + JSON.stringify(templates.api || {}), 'warn');
@@ -1214,7 +1215,7 @@ async function doLogin() {
     await browser.close();
     process.exit(1);
   }
-  log(cli.capture ? '抓包结束，保存结果…' : '模板已就绪，保存会话…', 'ok');
+  log(cli.capture ? '抓包结束，保存结果…' : '当前可采集模板已收集，保存会话…', 'ok');
   if (await isInAcademicSystem(page)) {
     await saveSession(context, statePath, cli.capture ? '抓包完成' : '模板就绪');
   }
@@ -1244,6 +1245,54 @@ function canAttempt(course) {
 function markCooldown(course, ms) {
   var kch = String(course.kch || course.kch_id);
   state.cooldown[kch] = Date.now() + ms;
+}
+
+function extractSelectionContext(html) {
+  var wanted = {
+    bh_id: 1, jg_id: 1, zyh_id: 1, zyfx_id: 1, njdm_id: 1, xz: 1, ccdm: 1,
+    xbm: 1, mzm: 1, xslbdm: 1, xsbj: 1, xqxnm: 1, xkxnm: 1, xkxqm: 1,
+    xkly: 1, xklc: 1, rwlx: 1, kklxdm: 1, xkkz_id: 1
+  };
+  var out = {};
+  var tagRe = /<input\b([^>]*)>/gi;
+  var tag;
+  while ((tag = tagRe.exec(String(html || '')))) {
+    var attrs = tag[1] || '';
+    var nameMatch = attrs.match(/\bname\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    if (!nameMatch) continue;
+    var name = nameMatch[1] || nameMatch[2] || nameMatch[3] || '';
+    if (!wanted[name]) continue;
+    var valueMatch = attrs.match(/\bvalue\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    out[name] = valueMatch ? (valueMatch[1] || valueMatch[2] || valueMatch[3] || '') : '';
+  }
+  Object.keys(wanted).forEach(function (key) {
+    if (out[key] != null) return;
+    var re = new RegExp(key + '\\s*[:=]\\s*[\'"]?([^\'"?,;&}\\s<]+)', 'i');
+    var match = String(html || '').match(re);
+    if (match) out[key] = match[1];
+  });
+  return out.bh_id ? out : null;
+}
+
+async function bootstrapRuntimeContext(rc) {
+  if (templates.ctx) return true;
+  var headers = apiHeaders('index');
+  headers.Accept = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+  var timeout = Math.max(1000, Number(cfg.requestTimeoutSec || 30) * 1000);
+  var res = await rc.get(selectionUrl(), { headers: headers, timeout: timeout });
+  var text = await res.text();
+  if (looksLikeAuthUrl(res.url()) && !extractSelectionContext(text)) {
+    throw new SessionError('选课页返回登录页面（会话已过期）');
+  }
+  var ctx = extractSelectionContext(text);
+  if (!ctx) return false;
+  templates.ctx = ctx;
+  var xk = params.pickXkkzFromObj(ctx);
+  if (xk) templates.xkkz = String(xk);
+  saveTemplates();
+  log('✓ 运行时学生上下文已获取', 'ok');
+  if (templates.xkkz) log('✓ 运行时选课批次 xkkz_id 已更新: ' + templates.xkkz, 'ok');
+  return true;
 }
 
 async function doQuery(rc) {
@@ -1477,9 +1526,22 @@ async function runLoop(rc) {
   log('======================================', 'info');
   log('开始' + (state.dryRun ? '干跑' : '实跑') + '：间隔 ' + state.interval + 's | 类别 kklxdm=' + state.kklxdm + ' | 目标 ' + state.targets.length + ' 条' + (state.dryRun ? '（只监控，不提交）' : ''), 'info');
   log('使用接口: ' + JSON.stringify(apiLib.buildEndpoints(cfg, templates)), 'dim');
+  var waitingForContext = false;
 
   while (true) {
     try {
+      if (!templates.ctx) {
+        var contextReady = await bootstrapRuntimeContext(rc);
+        if (!contextReady) {
+          if (!waitingForContext) {
+            log('选课尚未开放或尚未返回学生上下文，持续轮询选课页…', 'info');
+            waitingForContext = true;
+          }
+          await params.sleep(Math.round(state.interval * 1000));
+          continue;
+        }
+        waitingForContext = false;
+      }
       await scanOnce(rc);
       if (state.succeeded) {
         log('✓ 目标请求已返回成功，停止轮询', 'ok');
@@ -1497,7 +1559,6 @@ function printHelp() {
   console.log([
     '用法:',
     '  node grab.js --prepare --sso MODE    登录并采集 Cookie/模板，完成后退出',
-    '  node grab.js --prepare --prewarm     开抢前预登录并保存学生上下文',
     '  node grab.js                         使用已准备结果运行（不能自动登录）',
     '  node grab.js --account <id>          只运行指定账号',
     '  node grab.js --capture [--account]   打开浏览器抓包，按 Enter 保存',
@@ -1508,13 +1569,12 @@ function printHelp() {
     '  node grab.js --sso zfsoft            正方原生登录入口',
     '  node grab.js --sso wengine           反向代理/WEngine 登录入口',
     '  node grab.js --dryrun                强制干跑（只查询，不提交）',
-    '  node grab.js --dryrun=false          显式关闭干跑',
     '  node grab.js --delete                清空配置、Cookie/模板和日志',
     '  node grab.js --debug                 输出详细登录/跳转/表单日志',
     '  node grab.js --help                  显示本帮助',
     '',
     '--sso 只能与 --prepare 或 --capture 一起使用。',
-    '--dryrun 只影响普通运行；未指定时使用配置里的 dryRun。',
+    '--dryrun 开启干跑；node grab.js 不带该参数时执行实跑。',
     '--delete 必须单独使用，不能与任何其他参数组合。',
     '接口路径可在 config/config.json 的 api 字段覆盖，例如:',
     '  "api": { "query": "/xsxk/xxx.html?gnmkdm=N253512" }'
@@ -1575,13 +1635,8 @@ async function main() {
   }
   if (cli.prepare) {
     await doLogin();
-    log(cli.prewarm
-      ? '账号预热完成：Cookie、学生上下文和已有模板已保存；动态批次将在开抢后的首次查询中获取。'
-      : '账号准备完成：Cookie 已一次性保存，模板已写入，准备进程退出。', 'ok');
+    log('账号准备完成：Cookie、学生上下文和当前可采集模板已保存；动态数据将在运行时获取。', 'ok');
     return;
-  }
-  if (cli.prewarm) {
-    throw new Error('--prewarm 只能与 --prepare 一起使用');
   }
   if (cli.forceLogin) {
     throw new NotPreparedError('--force-login 只能与 --prepare 一起使用');
