@@ -93,6 +93,9 @@ node grab.js --import-har 选课.har
 |---|---|---|
 | `base` | 必填 | 正方系统根地址，如 `https://<your-host>/jwglxt`；仓库不写死学校地址 |
 | `indexPath` | `/xsxk/zzxkyzb_cxZzxkYzbIndex.html` | 选课首页路径 |
+| `loginPath` | 同 `indexPath` | 登录入口；如果登录先经过门户/统一认证页，填这里 |
+| `ssoPath` | 空 | 反代认证后仍需续登时使用的 SSO 接入口，可写完整 URL |
+| `selectionPath` | 自动推导 | 登录后要跳转的选课页；留空时使用 `indexPath` 或默认选课路径 |
 | `gnmkdm` | `N253512` | 功能模块号，按学校系统填写 |
 | `targets.kch` | `""` | 课程号（纯数字），如 `207786` |
 | `targets.jxb` | `""` | 教学班 ID（32 位十六进制） |
@@ -106,6 +109,11 @@ node grab.js --import-har 选课.har
 | `appendGnmkdm` | `true` | 自动给接口 URL 补 `gnmkdm`；若本校接口不接受可设 `false` |
 | `requestTimeoutSec` | `30` | 单次接口请求超时 |
 | `useTitleProbe` | `true` | 抓到前置探针模板时是否调用 `cxXkTitleMsg` |
+| `authMode` | `auto` | `auto`/`zfsoft`/`wengine`/`manual`；反代认证页用 `auto` 或 `wengine` |
+| `rewriteProxyAssets` | `true` | 反代把 js/css 改写成认证页时，自动还原静态资源 URL |
+| `bypassProxyCSP` | `true` | 反代改写登录页脚本时放宽浏览器 CSP，避免二段登录表单被拦截 |
+| `debug` | `false` | 详细调试日志；也可用命令行 `--debug` 临时开启 |
+| `debugFile` | 自动 | 调试日志路径；留空时按 `logFile` 生成 `*.debug.log` |
 | `notify.webhook` | `""` | 成功/会话过期推送 URL（ServerChan/PushPlus 类） |
 | `notify.beep` | `true` | 成功/失败时控制台提示音 |
 | `accounts[]` | 无 | 多账号列表；每个账号可覆盖 `base/login/targets/intervalSec/api` 等字段 |
