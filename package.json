@@ -7,7 +7,6 @@
   "main": "rob.js",
   "scripts": {
     "start": "node rob.js",
-    "prepare": "node rob.js --prepare",
     "prepare:zfsoft": "node rob.js --prepare --sso zfsoft",
     "prepare:wengine": "node rob.js --prepare --sso wengine",
     "prepare-accounts": "node rob.js --prepare",

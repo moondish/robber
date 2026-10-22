@@ -16,9 +16,14 @@
     "choosed": "",
     "drop": "",
     "title": "",
-    "batch": ""
+    "batch": "",
+    "subdetail": "",
+    "notice": ""
   },
   "intervalSec": 2.5,
+  "fallbackAfterMisses": 5,
+  "fallbackAfterSelectionFailures": 5,
+  "fallbackLimit": 10,
   "kklxdm": "10",
   "headless": false,
   "loginTimeoutMin": 5,

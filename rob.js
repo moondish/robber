@@ -28,6 +28,7 @@ var matchLib = require('./lib/match');
 var conflictLib = require('./lib/conflict');
 var apiLib = require('./lib/api');
 var captureLib = require('./lib/capture');
+var candidatesLib = require('./lib/candidates');
 
 function parseCli(argv) {
   var out = {
@@ -47,12 +48,12 @@ function parseCli(argv) {
   };
   for (var i = 0; i < argv.length; i++) {
     var a = argv[i];
-    if (a === '--capture' || a === '--capture-only') out.capture = true;
+    if (a === '--capture') out.capture = true;
     else if (a === '--help' || a === '-h') out.help = true;
     else if (a === '--list-accounts') out.listAccounts = true;
     else if (a === '--prepare') out.prepare = true;
     else if (a === '--force-login') out.forceLogin = true;
-    else if (a === '--debug' || a === '--verbose' || a === '-d') out.debug = true;
+    else if (a === '--debug') out.debug = true;
     else if (a === '--dryrun') {
       out.dryRun = true;
       if (argv[i + 1] && /^(true|false)$/i.test(argv[i + 1])) {
@@ -87,8 +88,8 @@ function parseCli(argv) {
 function normaliseSsoMode(value) {
   var v = String(value || '').trim().toLowerCase();
   if (!v) throw new Error('--sso 需要指定 zfsoft 或 wengine');
-  if (v === 'zfsoft' || v === 'zf' || v === 'native' || v === '正方') return 'zfsoft';
-  if (v === 'wengine' || v === 'proxy' || v === 'reverse' || v === '反代') return 'wengine';
+  if (v === 'zfsoft') return 'zfsoft';
+  if (v === 'wengine') return 'wengine';
   throw new Error('--sso 仅支持 zfsoft 或 wengine: ' + value);
 }
 
@@ -211,7 +212,6 @@ var templates = {
   xkkz: null,
   api: {},
   meta: {},
-  responses: {},
   warnings: []
 };
 var state = cfg ? {
@@ -219,6 +219,11 @@ var state = cfg ? {
   njdm: [],      // 年级过滤（来自 targets.njdm_id）
   querying: false,
   dryRun: !!cli.dryRun,
+  misses: 0,
+  selectionFailures: 0,
+  currentList: [],
+  lastFailedJxb: '',
+  selectedKeys: {},
   interval: cfg.intervalSec >= 1 ? cfg.intervalSec : 2.5,
   kklxdm: String(cfg.kklxdm || '10'),
   succeeded: false,
@@ -285,7 +290,36 @@ function saveTemplates() {
   var out = params.deepCopy(templates);
   delete out.pendingRequests;
   delete out.warnings;
-  saveJson(cfg.templatesFile || path.join('state', 'templates.json'), out, true);
+  delete out.responses;
+  ['ctx', 'display', 'query', 'detail', 'submit', 'drop', 'choosed', 'xkkz'].forEach(function (key) {
+    if (out[key] == null || out[key] === '') delete out[key];
+  });
+  function clearRequestValues(tpl, fields) {
+    if (!tpl || typeof tpl !== 'object' || Array.isArray(tpl)) return;
+    fields.forEach(function (key) {
+      if (Object.prototype.hasOwnProperty.call(tpl, key)) tpl[key] = '';
+    });
+  }
+  function sanitisePersistentTemplate(tpl) {
+    clearRequestValues(tpl.detail, ['kch_id', 'xkkz_id']);
+    clearRequestValues(tpl.submit, [
+      'jxb_ids', 'jxbzls', 'kch_id', 'kcmc', 'xkkz_id', 'njdm_id', 'zyh_id',
+      'xkxnm', 'xkxqm', 'kklxdm', 'xklc', 'rwlx'
+    ]);
+    clearRequestValues(tpl.drop, [
+      'jxb_ids', 'jxbzls', 'kch_id', 'xkkz_id', 'njdm_id', 'zyh_id',
+      'xkxnm', 'xkxqm', 'kklxdm', 'xklc', 'rwlx'
+    ]);
+  }
+  sanitisePersistentTemplate(out);
+  var target = cfg.templatesFile || path.join('state', 'templates.json');
+  var existing = loadJson(target);
+  if (existing && typeof existing === 'object' && !Array.isArray(existing)) {
+    delete existing.responses;
+    sanitisePersistentTemplate(existing);
+    out = configLib.deepMerge(existing, out);
+  }
+  saveJson(target, out, true);
 }
 
 function hasCapturedTemplates() {
@@ -499,6 +533,22 @@ function waitForEnter(promptText) {
   });
 }
 
+function readChoice(timeoutMs) {
+  return new Promise(function (resolve) {
+    var readline = require('readline');
+    var rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    var timer = setTimeout(function () {
+      try { rl.close(); } catch (e) {}
+      resolve('');
+    }, Math.max(1000, Number(timeoutMs) || 15000));
+    rl.question('请输入候选编号后按 Enter（直接 Enter 继续轮询）：', function (answer) {
+      clearTimeout(timer);
+      rl.close();
+      resolve(String(answer || '').trim());
+    });
+  });
+}
+
 function printCaptureSummary() {
   var s = captureLib.summary(templates);
   log('接口映射: ' + JSON.stringify(s.api || {}), 'info');
@@ -533,7 +583,11 @@ function attachDebug(page) {
   });
   page.on('response', function (res) {
     var url = res.url();
-    if (res.status() >= 300 || /webauth|wengine|login|cas|auth/i.test(url)) {
+    var type = res.request().resourceType();
+    var interesting = res.status() >= 300 ||
+      ((type === 'document' || type === 'xhr' || type === 'fetch') &&
+        /webauth|wengine|login|cas|auth|\/xsxk\//i.test(url));
+    if (interesting) {
       debug.log('response', {
         url: url,
         status: res.status(),
@@ -645,10 +699,20 @@ async function findFormFrame(page) {
         function visible(el) {
           return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
         }
+        function firstVisible(selector) {
+          var els = document.querySelectorAll(selector);
+          for (var i = 0; i < els.length; i++) {
+            if (visible(els[i])) return els[i];
+          }
+          return null;
+        }
         return {
-          hasPassword: visible(document.querySelector('input[type="password"]')),
-          username: visible(document.querySelector('#username, #yhm, #un, input[name="username"], input[name*="yhm"]')),
-          login: visible(document.querySelector('#login, #dl, button[type="submit"], input[type="submit"]'))
+          hasPassword: !!firstVisible('input[type="password"]'),
+          username: !!firstVisible(
+            '#username, #yhm, #un, input[name="username"], input[name="userName"], ' +
+            'input[name="account"], input[name="xh"], input[name*="yhm"], input[placeholder*="用户名"], input[placeholder*="账号"]'
+          ),
+          login: !!firstVisible('#login, #dl, button[type="submit"], input[type="submit"], button.login-btn, a.login-btn')
         };
       });
       debug.log('frame-probe', { url: frame.url(), name: frame.name(), probe: probe });
@@ -714,11 +778,22 @@ async function autoFillLogin(page) {
       var switched = false;
       try {
         switched = await page.evaluate(function () {
-          var els = document.querySelectorAll('a, button, div, span');
-          for (var i = 0; i < els.length; i++) {
-            var txt = (els[i].textContent || '') + '';
-            if (/返回账号登录|账号登录|密码登录|切换账号登录/.test(txt)) {
-              els[i].click();
+          function visible(el) {
+            return !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+          }
+          var groups = [
+            'a, button, [role="button"], input[type="button"]',
+            'div[onclick], span[onclick], div[role="button"], span[role="button"]',
+            'div, span'
+          ];
+          for (var g = 0; g < groups.length; g++) {
+            var els = document.querySelectorAll(groups[g]);
+            for (var i = 0; i < els.length; i++) {
+              var el = els[i];
+              var txt = String(el.textContent || '').trim();
+              if (!visible(el) || !/返回账号登录|账号登录|密码登录|切换账号登录/.test(txt)) continue;
+              if (g === 2 && el.querySelector('a, button, [role="button"]')) continue;
+              el.click();
               return true;
             }
           }
@@ -741,8 +816,11 @@ async function autoFillLogin(page) {
       var p = args.p;
       function find(selectors) {
         for (var i = 0; i < selectors.length; i++) {
-          var el = document.querySelector(selectors[i]);
-          if (el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length)) return el;
+          var els = document.querySelectorAll(selectors[i]);
+          for (var j = 0; j < els.length; j++) {
+            var el = els[j];
+            if (el.offsetWidth || el.offsetHeight || el.getClientRects().length) return el;
+          }
         }
         return null;
       }
@@ -825,14 +903,19 @@ async function tryTriggerQuery(page) {
 }
 
 async function capturePageContext(page) {
-  if (templates.ctx) return;
+  if (templates.ctx && templates.ctx.xkkz_xh && templates.xkkz) return;
   var keys = [
     'bh_id', 'jg_id', 'zyh_id', 'zyfx_id', 'njdm_id', 'xz', 'ccdm', 'xbm',
     'mzm', 'xslbdm', 'xsbj', 'xkxnm', 'xkxqm', 'xkly', 'xklc', 'rwlx',
-    'kklxdm', 'xkkz_id'
+    'kklxdm', 'xkkz_id', 'xkkz_xh', 'jg_id_1', 'njdm_id_1', 'zyh_id_1',
+    'xqh_id', 'xszxzt', 'firstKklxdm', 'firstXkkzId', 'firstXkkzXh',
+    'bklx_id', 'sfkxq', 'sfkcfx', 'sfkkjyxdxnxq', 'kzkcgs', 'gnjkxdnj',
+    'xkzgbj', 'rlkz', 'rlzlkz', 'sfkknj', 'sfkkzy', 'kzybkxy', 'sfznkx',
+    'zdkxms', 'bhbcyxkjxb', 'kkbk', 'kkbkdj', 'bklbkcj', 'sfkgbcx',
+    'sfrxtgkcxd', 'tykczgxdcs', 'bbhzxjxb', 'zxgbxkkg'
   ];
   var frames = page.frames();
-  for (var i = 0; i < frames.length && !templates.ctx; i++) {
+  for (var i = 0; i < frames.length; i++) {
     try {
       var found = await frames[i].evaluate(function (wanted) {
         var out = {};
@@ -864,11 +947,14 @@ async function capturePageContext(page) {
         return out.bh_id ? out : null;
       }, keys);
       if (found) {
-        templates.ctx = found;
-        var xk = params.pickXkkzFromObj(found);
-        if (xk && !templates.xkkz) templates.xkkz = String(xk);
-        log('✓ 页面学生上下文已采集', 'ok');
-        debug.log('page-context', found);
+        var beforeContext = templates.ctx ? JSON.stringify(templates.ctx) : '';
+        if (templates.ctx) found = Object.assign({}, templates.ctx, found);
+        applyContextDefaults(found);
+        if (beforeContext !== JSON.stringify(templates.ctx)) {
+          log('✓ 页面学生上下文已采集', 'ok');
+          debug.log('page-context', found);
+        }
+        break;
       }
     } catch (e) {}
   }
@@ -895,6 +981,7 @@ async function detectAuthPage(page) {
 // WEngine 反代认证页的“统一认证”入口：进入 CAS 后复用通用登录表单填充。
 async function clickCasLogin(page) {
   var clicked = false;
+  var pagesBefore = page.context().pages().slice();
   var frames = page.frames();
   for (var i = 0; i < frames.length && !clicked; i++) {
     try {
@@ -910,29 +997,28 @@ async function clickCasLogin(page) {
       debug.log('cas-click-frame', { url: frames[i].url(), name: frames[i].name(), error: e.message });
     }
   }
-  if (!clicked) return false;
-  try { await page.waitForLoadState('domcontentloaded', { timeout: 30000 }); } catch (e) {}
+  if (!clicked) return { clicked: false, page: page };
+  var authPage = page;
+  var deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    var pages = page.context().pages();
+    for (var i = pages.length - 1; i >= 0; i--) {
+      if (pagesBefore.indexOf(pages[i]) < 0) {
+        authPage = pages[i];
+        break;
+      }
+    }
+    if (authPage !== page) break;
+    await params.sleep(200);
+  }
+  try { await authPage.waitForLoadState('domcontentloaded', { timeout: 30000 }); } catch (e) {}
   await params.sleep(1000);
-  log('已进入统一认证登录，当前页面: ' + page.url(), 'info');
-  return true;
+  if (authPage !== page) log('统一认证已在新的浏览器标签页打开', 'info');
+  log('已进入统一认证登录，当前页面: ' + authPage.url(), 'info');
+  return { clicked: true, page: authPage };
 }
 
-// 登录入口可能是门户页/统一认证页；登录成功后主动跳到真正的选课页。
-async function ensureSelectionPage(page) {
-  var current = page.url();
-  if (apiLib.isSelectionPath(current)) return true;
-  // 上一次跳转如果停在 about:blank 或其它中间页，下一次轮询需要重新尝试。
-  selectionNavigated = false;
-  if (looksLikeAuthUrl(current)) return false;
-  var title = '';
-  try { title = await page.title(); } catch (e) {}
-  if (!title) {
-    try { title = await page.evaluate(function () { return document.title || ''; }); } catch (e) {}
-  }
-  debug.log('selection-check', { url: current, title: title });
-  if (/应用认证平台|统一身份认证/.test(title)) return false;
-
-  // iframe/弹窗里仍显示密码框或二维码时，说明登录还没完成，不要抢跳转。
+async function inspectLoginChallenge(page) {
   var challenge = { password: false, qr: false };
   var frames = page.frames();
   for (var i = 0; i < frames.length; i++) {
@@ -955,8 +1041,28 @@ async function ensureSelectionPage(page) {
       challenge.qr = challenge.qr || found.qr;
     } catch (e) {}
   }
+  return challenge;
+}
+
+// 登录入口可能是门户页/统一认证页；登录成功后主动跳到真正的选课页。
+async function ensureSelectionPage(page) {
+  var current = page.url();
+  // 上一次跳转如果停在 about:blank 或其它中间页，下一次轮询需要重新尝试。
+  selectionNavigated = false;
+  if (looksLikeAuthUrl(current)) return false;
+  var title = '';
+  try { title = await page.title(); } catch (e) {}
+  if (!title) {
+    try { title = await page.evaluate(function () { return document.title || ''; }); } catch (e) {}
+  }
+  debug.log('selection-check', { url: current, title: title });
+  if (/应用认证平台|统一身份认证/.test(title)) return false;
+
+  // 即使 URL 已是选课页，也要先确认页面没有在原地址展示登录表单。
+  var challenge = await inspectLoginChallenge(page);
   debug.log('selection-check-challenge', { frame: current, challenge: challenge, title: title });
   if (challenge.password || challenge.qr) return false;
+  if (apiLib.isSelectionPath(current)) return true;
   if (Date.now() < selectionRetryAt) return false;
 
   var isPortal = /\/xtgl\/index|\/index_initMenu|\/home|\/main|\/portal/i.test(current) ||
@@ -987,6 +1093,8 @@ async function ensureSelectionPage(page) {
 async function isInAcademicSystem(page) {
   var current = page.url();
   if (!current || looksLikeAuthUrl(current)) return false;
+  var challenge = await inspectLoginChallenge(page);
+  if (challenge.password || challenge.qr) return false;
   if (apiLib.isSelectionPath(current)) return true;
 
   var sameOrigin = false;
@@ -1033,7 +1141,7 @@ async function ensureLogin() {
   // 普通运行只允许复用 --prepare 生成的结果，不再自动打开登录浏览器。
   var savedTpl = loadJson(cfg.templatesFile || path.join('state', 'templates.json'));
   if (savedTpl) {
-    ['ctx', 'display', 'query', 'detail', 'submit', 'drop', 'choosed', 'xkkz', 'api', 'meta', 'responses'].forEach(function (k) {
+    ['ctx', 'display', 'query', 'detail', 'submit', 'drop', 'choosed', 'xkkz', 'api', 'meta'].forEach(function (k) {
       if (savedTpl[k]) templates[k] = params.deepCopy(savedTpl[k]);
     });
   }
@@ -1110,6 +1218,10 @@ async function doLogin() {
     debug.log('new-page', { url: p.url() });
     attachCapture(p);
     attachDebug(p);
+    page = p;
+    p.on('close', function () {
+      if (page === p) page = context.pages()[0] || p;
+    });
   });
   try {
     var entry = loginUrl();
@@ -1136,12 +1248,16 @@ async function doLogin() {
   var isProxyAuth = auth.isReverseProxy || authMode === 'wengine';
   if (authMode === 'manual') {
     log('authMode=manual：请在浏览器里完成登录。', 'warn');
-  } else if (isProxyAuth && authMode !== 'zfsoft') {
+  } else if (isProxyAuth) {
+    if (authMode === 'zfsoft') {
+      log('正方原生入口被 WEngine 网关强制拦截；先完成网关认证，再进入正方原生登录页', 'warn');
+    }
     log('检测到反向代理认证页（应用认证平台/WEngine）', 'info');
     if (cfg.login && (cfg.login.username || cfg.login.password)) {
       log('尝试通过“统一认证”登录…', 'info');
-      var enteredCas = await clickCasLogin(page);
-      if (enteredCas) {
+      var casResult = await clickCasLogin(page);
+      if (casResult.clicked) {
+        page = casResult.page;
         log('CAS 登录页: ' + page.url(), 'info');
         await autoFillLogin(page);
       } else {
@@ -1179,7 +1295,7 @@ async function doLogin() {
   }
 
   var deadline = Date.now() + (cfg.loginTimeoutMin || 5) * 60000;
-  var triggered = 0;
+  var queryAttempted = false;
   while (!cli.capture && Date.now() < deadline) {
     await resumeViaSso(page);
     await handleLoginPage(page);
@@ -1189,9 +1305,9 @@ async function doLogin() {
       await saveSession(context, statePath, '教务系统会话更新');
       await capturePageContext(page);
     }
-    if (academicReady && !templates.query && triggered < 3) {
+    if (academicReady && !templates.query && !queryAttempted) {
       await tryTriggerQuery(page);
-      triggered++;
+      queryAttempted = true;
       await params.sleep(1000);
       continue;
     }
@@ -1247,11 +1363,36 @@ function markCooldown(course, ms) {
   state.cooldown[kch] = Date.now() + ms;
 }
 
-function extractSelectionContext(html) {
+function configuredIntervalMs() {
+  return Math.max(1000, Math.round(Number(state.interval || 2.5) * 1000));
+}
+
+function applyContextDefaults(ctx) {
+  if (!ctx) return null;
+  if (!ctx.jg_id && ctx.jg_id_1) ctx.jg_id = ctx.jg_id_1;
+  if (!ctx.njdm_id && ctx.njdm_id_1) ctx.njdm_id = ctx.njdm_id_1;
+  if (!ctx.zyh_id && ctx.zyh_id_1) ctx.zyh_id = ctx.zyh_id_1;
+  if (ctx.firstKklxdm) ctx.kklxdm = ctx.firstKklxdm;
+  if (ctx.firstXkkzId) ctx.xkkz_id = ctx.firstXkkzId;
+  if (ctx.firstXkkzXh) ctx.xkkz_xh = ctx.firstXkkzXh;
+  templates.ctx = ctx;
+  var xk = params.pickXkkzFromObj(ctx);
+  if (xk) templates.xkkz = String(xk);
+  if (ctx.kklxdm) state.kklxdm = String(ctx.kklxdm);
+  return ctx;
+}
+
+function extractSelectionFields(html) {
   var wanted = {
     bh_id: 1, jg_id: 1, zyh_id: 1, zyfx_id: 1, njdm_id: 1, xz: 1, ccdm: 1,
     xbm: 1, mzm: 1, xslbdm: 1, xsbj: 1, xqxnm: 1, xkxnm: 1, xkxqm: 1,
-    xkly: 1, xklc: 1, rwlx: 1, kklxdm: 1, xkkz_id: 1
+    xkly: 1, xklc: 1, rwlx: 1, kklxdm: 1, xkkz_id: 1, xkkz_xh: 1,
+    jg_id_1: 1, njdm_id_1: 1, zyh_id_1: 1, xqh_id: 1, xszxzt: 1,
+    firstKklxdm: 1, firstXkkzId: 1, firstXkkzXh: 1, bklx_id: 1, sfkxq: 1,
+    sfkcfx: 1, sfkkjyxdxnxq: 1, kzkcgs: 1, gnjkxdnj: 1, xkzgbj: 1,
+    rlkz: 1, rlzlkz: 1, sfkknj: 1, sfkkzy: 1, kzybkxy: 1, sfznkx: 1,
+    zdkxms: 1, bhbcyxkjxb: 1, kkbk: 1, kkbkdj: 1, bklbkcj: 1,
+    sfkgbcx: 1, sfrxtgkcxd: 1, tykczgxdcs: 1, bbhzxjxb: 1, zxgbxkkg: 1
   };
   var out = {};
   var tagRe = /<input\b([^>]*)>/gi;
@@ -1271,11 +1412,16 @@ function extractSelectionContext(html) {
     var match = String(html || '').match(re);
     if (match) out[key] = match[1];
   });
+  return out;
+}
+
+function extractSelectionContext(html) {
+  var out = extractSelectionFields(html);
   return out.bh_id ? out : null;
 }
 
 async function bootstrapRuntimeContext(rc) {
-  if (templates.ctx) return true;
+  if (templates.ctx && templates.ctx.xkkz_xh && templates.ctx.xklc && templates.ctx.rwlx) return true;
   var headers = apiHeaders('index');
   headers.Accept = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
   var timeout = Math.max(1000, Number(cfg.requestTimeoutSec || 30) * 1000);
@@ -1286,9 +1432,32 @@ async function bootstrapRuntimeContext(rc) {
   }
   var ctx = extractSelectionContext(text);
   if (!ctx) return false;
-  templates.ctx = ctx;
-  var xk = params.pickXkkzFromObj(ctx);
-  if (xk) templates.xkkz = String(xk);
+  if (templates.ctx) ctx = Object.assign({}, templates.ctx, ctx);
+  applyContextDefaults(ctx);
+  if (!templates.ctx.xklc || !templates.ctx.rwlx) {
+    var displayParams = {
+      xkkz_id: templates.xkkz || templates.ctx.xkkz_id || '',
+      kklxdm: state.kklxdm,
+      xszxzt: templates.ctx.xszxzt || '1',
+      njdm_id: templates.ctx.njdm_id || '',
+      zyh_id: templates.ctx.zyh_id || '',
+      kspage: '0',
+      jspage: '0'
+    };
+    var displayRes = await rc.post(endpointUrl('display'), {
+      headers: apiHeaders('display'),
+      form: params.flatten(displayParams),
+      timeout: timeout
+    });
+    var displayHtml = await displayRes.text();
+    var displayFields = extractSelectionFields(displayHtml);
+    if (Object.keys(displayFields).length) {
+      templates.ctx = Object.assign({}, templates.ctx, displayFields);
+      templates.display = displayParams;
+      applyContextDefaults(templates.ctx);
+      log('✓ 运行时选课轮次信息已获取: xklc=' + (templates.ctx.xklc || '?'), 'ok');
+    }
+  }
   saveTemplates();
   log('✓ 运行时学生上下文已获取', 'ok');
   if (templates.xkkz) log('✓ 运行时选课批次 xkkz_id 已更新: ' + templates.xkkz, 'ok');
@@ -1326,18 +1495,81 @@ async function doQuery(rc) {
   return list;
 }
 
+function courseKeys(course) {
+  return {
+    kch: String(course && (course.kch_id || course.kch) || ''),
+    jxb: String(course && (course.jxb_id || course.jxbId) || '').toUpperCase()
+  };
+}
+
+function isCourseSelected(course) {
+  var keys = courseKeys(course);
+  return !!(
+    (keys.kch && state.selectedKeys['kch:' + keys.kch]) ||
+    (keys.jxb && state.selectedKeys['jxb:' + keys.jxb])
+  );
+}
+
+async function refreshSelectedCourses(rc) {
+  var map = {};
+  try {
+    var choosed = await apiPost(rc, 'choosed', params.fetchChoosedParams(templates), { allowHtml: true });
+    choosed = params.normaliseChoosed(choosed);
+    choosed.forEach(function (course) {
+      var keys = courseKeys(course);
+      if (keys.kch) map['kch:' + keys.kch] = true;
+      if (keys.jxb) map['jxb:' + keys.jxb] = true;
+    });
+    state.selectedKeys = map;
+  } catch (e) {
+    if (e instanceof SessionError) throw e;
+    log('[已选检测] 刷新已选状态失败（忽略）: ' + e.message, 'warn');
+  }
+}
+
 async function scanOnce(rc) {
   if (state.querying) return [];
   state.querying = true;
   try {
     var list = await doQuery(rc);
+    state.currentList = list;
+    await refreshSelectedCourses(rc);
+    list.forEach(function (course) { course.__selected = isCourseSelected(course); });
     log('[查询] 返回 ' + list.length + ' 门课', 'info');
     var hits = list.filter(function (c) { return matchLib.matchTarget(state.targets, c, state.njdm); });
     if (hits.length) {
-      log('[命中] ' + hits.map(function (c) { return '[' + c.kch + ']' + c.kcmc; }).join(' / '), 'hit');
+      state.misses = 0;
+      log('[命中] ' + hits.map(function (c) {
+        return '[' + c.kch + ']' + c.kcmc + (c.__selected ? '(已选)' : '');
+      }).join(' / '), 'hit');
+      var selectedHit = hits.filter(function (c) { return c.__selected; })[0];
+      if (selectedHit) {
+        log('[已选] [' + (selectedHit.kch || selectedHit.kch_id) + ']' +
+          selectedHit.kcmc + ' 已在你的已选课表中', 'ok');
+        notify('已选课程', selectedHit.kcmc + ' 已在已选课表中');
+        state.claim[String(selectedHit.kch || selectedHit.kch_id)] = true;
+        state.cooldown[String(selectedHit.kch || selectedHit.kch_id)] = 0;
+        state.selectionFailures = 0;
+        state.lastFailedJxb = '';
+        state.succeeded = true;
+      }
       for (var i = 0; i < hits.length; i++) {
         if (state.succeeded) break;
         if (!state.dryRun) await maybeAutoSelect(rc, hits[i]);
+        var failureLimit = Math.max(1, Number(cfg.fallbackAfterSelectionFailures || 5));
+        if (!state.succeeded && state.selectionFailures >= failureLimit) {
+          await offerFallbackCandidates(rc, state.currentList, state.lastFailedJxb,
+            state.selectionFailures, '选课失败');
+          state.selectionFailures = 0;
+          break;
+        }
+      }
+    } else {
+      state.misses++;
+      var fallbackAfter = Math.max(1, Number(cfg.fallbackAfterMisses || 5));
+      if (state.misses >= fallbackAfter) {
+        await offerFallbackCandidates(rc, list, '', state.misses, '未命中目标');
+        state.misses = 0;
       }
     }
     return hits;
@@ -1350,30 +1582,56 @@ async function scanOnce(rc) {
   }
 }
 
+async function offerFallbackCandidates(rc, list, excludeJxb, count, reason) {
+  var filtered = (Array.isArray(list) ? list : []).filter(function (course) {
+    if (course.__selected) return false;
+    return !excludeJxb || String(course.jxb_id || course.jxbId || '') !== String(excludeJxb);
+  });
+  var rows = candidatesLib.rankCandidates(filtered, cfg.fallbackLimit || 10);
+  if (!rows.length) return;
+  log('连续 ' + count + ' 次' + reason + '，按人数/剩余容量推荐候选：', 'warn');
+  rows.forEach(function (row, i) {
+    log('  ' + (i + 1) + '. ' + candidatesLib.candidateLabel(row.course), 'info');
+  });
+  if (!process.stdin || !process.stdin.isTTY) {
+    notify(reason, '已连续 ' + count + ' 次' + reason + '，请查看终端候选列表');
+    return;
+  }
+  var answer = await readChoice(20000);
+  if (!answer) {
+    log('未选择候选，继续按配置间隔轮询', 'info');
+    return;
+  }
+  var index = Number(answer);
+  if (!Number.isInteger(index) || index < 1 || index > rows.length) {
+    log('候选编号无效，继续轮询', 'warn');
+    return;
+  }
+  var course = rows[index - 1].course;
+  log('已选择候选: ' + candidatesLib.candidateLabel(course), 'hit');
+  if (state.dryRun) {
+    log('当前为干跑，不提交候选课程', 'warn');
+    return;
+  }
+  await maybeAutoSelect(rc, course);
+}
+
 async function maybeAutoSelect(rc, course) {
   var kch = String(course.kch || course.kch_id);
   if (!canAttempt(course)) return;
   var desc = '[' + kch + '] ' + course.kcmc;
-  // 已选检测：目标已在已选课表中 → 明确提示并标记完成，不再反复抢
-  try {
-    var choosed = await apiPost(rc, 'choosed', params.fetchChoosedParams(templates), { allowHtml: true });
-    choosed = params.normaliseChoosed(choosed);
-    var already = Array.isArray(choosed) && choosed.some(function (c) {
-      return String(c.kch || '') === String(course.kch || '') || String(c.kch_id || '') === String(course.kch_id || '');
-    });
-    if (already) {
-      log('[已选] ' + desc + ' 已在你的已选课表中，无需重复抢，标记完成', 'ok');
-      notify('已选课程', course.kcmc + ' 已在已选课表中');
-      state.claim[kch] = true;
-      state.cooldown[kch] = 0;
-      state.succeeded = true;
-      return;
-    }
-  } catch (e) {
-    if (e instanceof SessionError) throw e;
-    log('[已选检测] 查询已选课失败（忽略，继续尝试）: ' + e.message, 'warn');
+  if (course.__selected || isCourseSelected(course)) {
+    log('[已选] ' + desc + ' 已在你的已选课表中，无需重复抢，标记完成', 'ok');
+    notify('已选课程', course.kcmc + ' 已在已选课表中');
+    state.claim[kch] = true;
+    state.cooldown[kch] = 0;
+    state.selectionFailures = 0;
+    state.lastFailedJxb = '';
+    state.succeeded = true;
+    return;
   }
   state.claim[kch] = true; // 防并发重复进入
+  var failuresBefore = state.selectionFailures;
   try {
     await selectFlow(rc, course);
   } catch (e) {
@@ -1382,6 +1640,16 @@ async function maybeAutoSelect(rc, course) {
     markCooldown(course, 15000);
     state.claim[kch] = false;
   }
+  if (!state.succeeded && state.selectionFailures === failuresBefore) {
+    noteSelectionFailure(course);
+  }
+}
+
+function noteSelectionFailure(course, detail) {
+  state.selectionFailures++;
+  state.lastFailedJxb = String(
+    (detail && detail.jxb_id) || course.jxb_id || course.jxbId || ''
+  );
 }
 
 async function fetchJxb(rc, course) {
@@ -1430,9 +1698,10 @@ async function selectFlow(rc, course) {
   } catch (e) {
     if (e instanceof SessionError) throw e;
     if (e instanceof NoClassError) {
-      log('[选课] ' + desc + '：' + e.message + '（名额满/限选/批次原因，已降频到 60s 自动重试）', 'warn');
+      var retryMs = configuredIntervalMs();
+      log('[选课] ' + desc + '：' + e.message + '（按配置间隔 ' + (retryMs / 1000) + 's 自动重试）', 'warn');
       state.claim[kchKey] = false;
-      markCooldown(course, 60000);
+      markCooldown(course, retryMs);
       return;
     }
     throw e;
@@ -1471,8 +1740,11 @@ async function handleSubmitResult(rc, course, detail, res) {
     beep();
     state.claim[kchKey] = true;
     state.cooldown[kchKey] = 0;
+    state.selectionFailures = 0;
+    state.lastFailedJxb = '';
     state.succeeded = true;
   } else {
+    noteSelectionFailure(course, detail);
     log('[失败] ' + desc + (msg ? ' - ' + msg : ' - flag=' + flag + ' resp=' + JSON.stringify(res)), 'err');
     if (/冲突/.test(msg)) {
       await conflictLib.resolveConflict(deps(rc), course, detail, msg);
@@ -1530,7 +1802,7 @@ async function runLoop(rc) {
 
   while (true) {
     try {
-      if (!templates.ctx) {
+      if (!templates.ctx || !templates.ctx.xkkz_xh || !templates.ctx.xklc || !templates.ctx.rwlx) {
         var contextReady = await bootstrapRuntimeContext(rc);
         if (!contextReady) {
           if (!waitingForContext) {
@@ -1566,7 +1838,7 @@ function printHelp() {
     '  node rob.js --list-accounts         列出配置中的账号',
     '  node rob.js --config FILE           使用指定配置文件',
     '  node rob.js --force-login           忽略已保存会话，强制重新登录',
-    '  node rob.js --sso zfsoft            正方原生登录入口',
+    '  node rob.js --sso zfsoft            优先正方原生（网关拦截时先认证）',
     '  node rob.js --sso wengine           反向代理/WEngine 登录入口',
     '  node rob.js --dryrun                强制干跑（只查询，不提交）',
     '  node rob.js --delete                清空配置、Cookie/模板和日志',
@@ -1604,7 +1876,7 @@ async function runHarImport(file) {
 
   var store = captureLib.createStore();
   var counts = captureLib.importHar(store, har, { base: cfg.base });
-  ['ctx', 'display', 'query', 'detail', 'submit', 'drop', 'choosed', 'xkkz', 'api', 'meta', 'responses'].forEach(function (k) {
+  ['ctx', 'display', 'query', 'detail', 'submit', 'drop', 'choosed', 'xkkz', 'api', 'meta'].forEach(function (k) {
     if (store[k] != null) templates[k] = store[k];
   });
   saveTemplates();

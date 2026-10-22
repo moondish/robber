@@ -1,5 +1,5 @@
 <h1 align="center">⚡ 【2026最新】正方教务系统抢课脚本-V9.0</h1>
-<h1 align="center">⚠️未进行测试</h1>
+<h3 align="center">⚠️已可提交,但未处理成功状态</h3>
 
 ## 优势
 
@@ -68,6 +68,9 @@ node rob.js --import-har 选课.har
 | `accounts[].targets.njdm_id` | `2025` | 年级过滤，留空=不过滤 |
 | `accounts[].login.username/password` | `""` | 登录账号密码（选填） |
 | `intervalSec` | `2.5` | 查询间隔秒数，勿低于 1.5 |
+| `fallbackAfterMisses` | `5` | 连续未命中多少次后展示快速候选 |
+| `fallbackAfterSelectionFailures` | `5` | 连续选课流程失败多少次后重新选择候选 |
+| `fallbackLimit` | `10` | 快速候选最大条数 |
 | `kklxdm` | `10` | 课程类别（10=通识选修） |
 | `api` | `{}` | 覆盖接口路径，如 `{"query":"/xsxk/xxx.html?gnmkdm=N253512"}`；显式填写优先，留空时用抓包结果 |
 | `appendGnmkdm` | `true` | 自动给接口 URL 补 `gnmkdm`；若本校接口不接受可设 `false` |
@@ -149,6 +152,7 @@ npm test                         # 运行单元测试（node lib/self_test.js）
 
 - [docs/使用说明.md](docs/使用说明.md) — 完整使用手册（配置、会话、冲突规则、故障排查）
 - [docs/开发文档.md](docs/开发文档.md) — 当前架构、接口、状态机与适配说明
+- [docs/接口测试报告.md](docs/接口测试报告.md) — 真实会话、HAR 和提交字段验证结果
 - [docs/抓包清单.md](docs/抓包清单.md) — 换学校/换版本时要抓的接口与字段
 - [docs/接口分析.md](docs/接口分析.md) — 选课接口逆向分析
 - [docs/开发计划2.md](docs/开发计划2.md) — 本独立工具实现方案
