@@ -155,8 +155,6 @@ npm test                         # 运行单元测试（node lib/self_test.js）
 - [docs/接口测试报告.md](docs/接口测试报告.md) — 真实会话、HAR 和提交字段验证结果
 - [docs/抓包清单.md](docs/抓包清单.md) — 换学校/换版本时要抓的接口与字段
 - [docs/接口分析.md](docs/接口分析.md) — 选课接口逆向分析
-- [docs/开发计划2.md](docs/开发计划2.md) — 本独立工具实现方案
-- ~~[docs/开发计划.md](docs/开发计划.md) — 油猴脚本版方案（首版，已弃用）~~
 
 > ⚠️ `config/config.json`（含账号密码）、`state/`（含 Cookie 和模板）等敏感/运行时文件已被 `.gitignore` 忽略，请勿提交。
 
@@ -184,7 +182,7 @@ npm test                         # 运行单元测试（node lib/self_test.js）
 
 - 核心代码：`rob.js` 与 `lib/`（匹配、冲突、参数解析）
 - [docs/接口分析.md](docs/接口分析.md) — 选课接口逆向分析
-- [docs/开发计划2.md](docs/开发计划2.md) — 独立工具实现方案
+- [docs/开发计划.md](docs/开发计划.md) — 独立工具实现方案
 
 请遵守 MIT License 及下方免责声明。
 
