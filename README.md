@@ -1,6 +1,8 @@
 <h1 align="center">⚡ 【2026最新】正方教务系统抢课脚本-V9.0</h1>
 <h3 align="center">⚠️已可提交,但未处理成功状态</h3>
 
+fork and revamp form https://github.com/ThisIsLittleSky/grabber
+
 ## 优势
 
 | 环节 | 手工方式 | 本工具 |
